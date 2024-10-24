@@ -17,6 +17,7 @@
 
 package org.apache.doris.common.util;
 
+import org.apache.doris.classloader.ChildFirstClassLoader;
 import org.apache.doris.common.Config;
 import org.apache.doris.mysql.authenticate.AuthenticatorFactory;
 import org.apache.doris.mysql.privilege.AccessControllerFactory;
