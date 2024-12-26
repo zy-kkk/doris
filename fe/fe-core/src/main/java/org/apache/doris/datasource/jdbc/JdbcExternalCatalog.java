@@ -365,7 +365,6 @@ public class JdbcExternalCatalog extends ExternalCatalog {
         }
         if (isTestConnection()) {
             try {
-                initLocalObjectsImpl();
                 testFeToJdbcConnection();
                 testBeToJdbcConnection();
             } finally {
@@ -379,10 +378,11 @@ public class JdbcExternalCatalog extends ExternalCatalog {
 
     private void testFeToJdbcConnection() throws DdlException {
         try {
+            initLocalObjectsImpl();
             jdbcClient.testConnection();
         } catch (JdbcClientException e) {
             String errorMessage = "Test FE Connection to JDBC Failed: " + e.getMessage();
-            LOG.error(errorMessage, e);
+            LOG.warn(errorMessage, e);
             throw new DdlException(errorMessage, e);
         }
     }
