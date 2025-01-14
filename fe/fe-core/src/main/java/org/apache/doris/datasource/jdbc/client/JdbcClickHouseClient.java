@@ -221,7 +221,7 @@ public class JdbcClickHouseClient extends JdbcClient {
             String[] versionParts = driverVersion.split("\\.");
             int majorVersion = Integer.parseInt(versionParts[0]);
             int minorVersion = Integer.parseInt(versionParts[1]);
-            // 判断是否大于等于 0.5.x
+            // Determine whether it is greater than or equal to 0.5.x
             return (majorVersion > 0) || (majorVersion == 0 && minorVersion >= 5);
         } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
             throw new JdbcClientException("Invalid driver version format: " + driverVersion, e);
