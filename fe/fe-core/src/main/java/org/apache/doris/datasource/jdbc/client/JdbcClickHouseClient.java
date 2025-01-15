@@ -216,7 +216,10 @@ public class JdbcClickHouseClient extends JdbcClient {
     /**
      * Determine whether the driver version is greater than or equal to 0.5.0.
      */
-    private boolean isNewClickHouseDriver(String driverVersion) {
+    private static boolean isNewClickHouseDriver(String driverVersion) {
+        if (driverVersion == null) {
+            throw new JdbcClientException("Driver version cannot be null");
+        }
         try {
             String[] versionParts = driverVersion.split("\\.");
             int majorVersion = Integer.parseInt(versionParts[0]);
@@ -224,7 +227,7 @@ public class JdbcClickHouseClient extends JdbcClient {
             // Determine whether it is greater than or equal to 0.5.x
             return (majorVersion > 0) || (majorVersion == 0 && minorVersion >= 5);
         } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
-            throw new JdbcClientException("Invalid driver version format: " + driverVersion, e);
+            throw new JdbcClientException("Invalid clickhouse driver version format: " + driverVersion, e);
         }
     }
 
