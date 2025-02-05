@@ -78,7 +78,6 @@ option(USE_JEMALLOC "Use jemalloc" ON)
 if (OS_MACOSX)
     set(GLIBC_COMPATIBILITY OFF)
     set(USE_LIBCPP ON)
-    set(USE_MEM_TRACKER OFF)
     set(USE_UNWIND OFF)
 endif()
 
