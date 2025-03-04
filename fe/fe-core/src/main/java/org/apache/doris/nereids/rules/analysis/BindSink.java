@@ -35,6 +35,8 @@ import org.apache.doris.datasource.iceberg.IcebergExternalDatabase;
 import org.apache.doris.datasource.iceberg.IcebergExternalTable;
 import org.apache.doris.datasource.jdbc.JdbcExternalDatabase;
 import org.apache.doris.datasource.jdbc.JdbcExternalTable;
+import org.apache.doris.datasource.trinoconnector.TrinoConnectorExternalDatabase;
+import org.apache.doris.datasource.trinoconnector.TrinoConnectorExternalTable;
 import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.analyzer.Scope;
 import org.apache.doris.nereids.analyzer.UnboundHiveTableSink;
@@ -42,6 +44,7 @@ import org.apache.doris.nereids.analyzer.UnboundIcebergTableSink;
 import org.apache.doris.nereids.analyzer.UnboundJdbcTableSink;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
 import org.apache.doris.nereids.analyzer.UnboundTableSink;
+import org.apache.doris.nereids.analyzer.UnboundTrinoConnectorTableSink;
 import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.pattern.MatchingContext;
@@ -72,6 +75,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalOneRowRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalProject;
 import org.apache.doris.nereids.trees.plans.logical.LogicalTableSink;
+import org.apache.doris.nereids.trees.plans.logical.LogicalTrinoConnectorTableSink;
 import org.apache.doris.nereids.trees.plans.logical.UnboundLogicalSink;
 import org.apache.doris.nereids.trees.plans.visitor.InferPlanOutputAlias;
 import org.apache.doris.nereids.types.DataType;
@@ -619,6 +623,47 @@ public class BindSink implements AnalysisRuleFactory {
         return columnToOutput;
     }
 
+    private Plan bindTrinoConnectorTableSink(MatchingContext<UnboundTrinoConnectorTableSink<Plan>> ctx) {
+        UnboundTrinoConnectorTableSink<?> sink = ctx.root;
+        Pair<TrinoConnectorExternalDatabase, TrinoConnectorExternalTable> pair = bind(ctx.cascadesContext, sink);
+        TrinoConnectorExternalDatabase database = pair.first;
+        TrinoConnectorExternalTable table = pair.second;
+        LogicalPlan child = ((LogicalPlan) sink.child());
+
+        List<Column> bindColumns;
+        if (sink.getColNames().isEmpty()) {
+            bindColumns = table.getFullSchema().stream().collect(ImmutableList.toImmutableList());
+        } else {
+            bindColumns = sink.getColNames().stream().map(cn -> {
+                Column column = table.getColumn(cn);
+                if (column == null) {
+                    throw new AnalysisException(String.format("column %s is not found in table %s",
+                            cn, table.getName()));
+                }
+                return column;
+            }).collect(ImmutableList.toImmutableList());
+        }
+        LogicalTrinoConnectorTableSink<?> boundSink = new LogicalTrinoConnectorTableSink<>(
+                database,
+                table,
+                bindColumns,
+                child.getOutput().stream()
+                    .map(NamedExpression.class::cast)
+                    .collect(ImmutableList.toImmutableList()),
+                sink.getDMLCommandType(),
+                Optional.empty(),
+                Optional.empty(),
+                child);
+        // we need to insert all the columns of the target table
+        if (boundSink.getCols().size() != child.getOutput().size()) {
+            throw new AnalysisException("insert into cols should be corresponding to the query output");
+        }
+        Map<String, NamedExpression> columnToOutput = getColumnToOutput(ctx, table, false,
+                boundSink, child);
+        LogicalProject<?> fullOutputProject = getOutputProjectByCoercion(table.getFullSchema(), child, columnToOutput);
+        return boundSink.withChildAndUpdateOutput(fullOutputProject);
+    }
+
     private Pair<Database, OlapTable> bind(CascadesContext cascadesContext, UnboundTableSink<? extends Plan> sink) {
         List<String> tableQualifier = RelationUtil.getQualifierName(cascadesContext.getConnectContext(),
                 sink.getNameParts());
@@ -667,6 +712,18 @@ public class BindSink implements AnalysisRuleFactory {
             return Pair.of(((JdbcExternalDatabase) pair.first), (JdbcExternalTable) pair.second);
         }
         throw new AnalysisException("the target table of insert into is not an jdbc table");
+    }
+
+    private Pair<TrinoConnectorExternalDatabase, TrinoConnectorExternalTable> bind(CascadesContext cascadesContext,
+            UnboundTrinoConnectorTableSink<? extends Plan> sink) {
+        List<String> tableQualifier = RelationUtil.getQualifierName(cascadesContext.getConnectContext(),
+                sink.getNameParts());
+        Pair<DatabaseIf<?>, TableIf> pair = RelationUtil.getDbAndTable(tableQualifier,
+                cascadesContext.getConnectContext().getEnv());
+        if (pair.second instanceof TrinoConnectorExternalTable) {
+            return Pair.of(((TrinoConnectorExternalDatabase) pair.first), (TrinoConnectorExternalTable) pair.second);
+        }
+        throw new AnalysisException("the target table of insert into is not a trino connector table");
     }
 
     private List<Long> bindPartitionIds(OlapTable table, List<String> partitions, boolean temp) {
