@@ -416,6 +416,10 @@ struct TIcebergTableSink {
     13: optional PlanNodes.TFileCompressType compression_type
 }
 
+struct TTrinoConnnectorTableSink {
+    
+}
+
 struct TDataSink {
   1: required TDataSinkType type
   2: optional TDataStreamSink stream_sink

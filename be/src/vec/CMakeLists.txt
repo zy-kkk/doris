@@ -27,6 +27,8 @@ endif ()
 
 add_library(Vec STATIC
         ${VEC_FILES}
+        sink/writer/jni/vjni_writer.cpp
+        sink/writer/jni/vjni_writer.h
 )
 
 pch_reuse(Vec)

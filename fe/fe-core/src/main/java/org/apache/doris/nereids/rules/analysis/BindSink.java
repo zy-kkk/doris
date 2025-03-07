@@ -42,6 +42,7 @@ import org.apache.doris.nereids.analyzer.UnboundIcebergTableSink;
 import org.apache.doris.nereids.analyzer.UnboundJdbcTableSink;
 import org.apache.doris.nereids.analyzer.UnboundSlot;
 import org.apache.doris.nereids.analyzer.UnboundTableSink;
+import org.apache.doris.nereids.analyzer.UnboundTrinoConnectorTableSink;
 import org.apache.doris.nereids.exceptions.AnalysisException;
 import org.apache.doris.nereids.parser.NereidsParser;
 import org.apache.doris.nereids.pattern.MatchingContext;
@@ -617,6 +618,42 @@ public class BindSink implements AnalysisRuleFactory {
         }
 
         return columnToOutput;
+    }
+
+    private Plan bindTrinoConnectorTableSink(MatchingContext<UnboundTrinoConnectorTableSink<Plan>> ctx) {
+        UnboundTrinoConnectorTableSink<?> sink = ctx.root;
+        Pair<TrinoConnectorExternalCatalog, TrinoConnectorExternalTable> pair = bind(ctx.cascadesContext, sink);
+        TrinoConnectorExternalCatalog database = pair.first;
+        TrinoConnectorExternalTable table = pair.second;
+        LogicalPlan child = ((LogicalPlan) sink.child());
+
+        List<Column> bindColumns;
+        if (sink.getColNames().isEmpty()) {
+            bindColumns = table.getFullSchema().stream().collect(ImmutableList.toImmutableList());
+        } else {
+            bindColumns = sink.getColNames().stream().map(cn -> {
+                Column column = table.getColumn(cn);
+            }).collect(ImmutableList.toImmutableList());
+        }
+        LogicalTrinoConnectorTableSink<?> boundSink = new LogicalTrinoConnectorTableSink<>(
+                database,
+                table,
+                bindColumns,
+                child.getOutput().stream()
+                    .map(NamedExpression.class::cast)
+                    .collect(ImmutableList.toImmutableList()),
+                sink.getDMLCommandType(),
+                Optional.empty(),
+                Optional.empty(),
+                child);
+        // we need to insert all the columns of the target table
+        if (boundSink.getCols().size() != child.getOutput().size()) {
+            throw new AnalysisException("insert into cols should be corresponding to the query output");
+        }
+        Map<String, NamedExpression> columnToOutput = getColumnToOutput(ctx, table, false,
+                boundSink, child);
+        LogicalProject<?> fullOutputProject = getOutputProjectByCoercion(table.getFullSchema(), child, columnToOutput);
+        return boundSink.withChildAndUpdateOutput(fullOutputProject);
     }
 
     private Pair<Database, OlapTable> bind(CascadesContext cascadesContext, UnboundTableSink<? extends Plan> sink) {
