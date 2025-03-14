@@ -125,22 +125,67 @@ Status VTrinoConnectorTableWriter::write(RuntimeState* state, vectorized::Block&
 
     // prepare table meta information
     std::unique_ptr<long[]> meta_data;
-    RETURN_IF_ERROR(JniConnector::to_java_table(*output_block, meta_data));
+    RETURN_IF_ERROR(JniConnector::to_java_table(&output_block, meta_data));
     long meta_address = (long)meta_data.get();
-    auto table_schema = JniConnector::parse_table_schema(*block);
+    auto table_schema = JniConnector::parse_table_schema(&block);
 
     // prepare constructor parameters
     std::map<String, String> write_params = {{"meta_address", std::to_string(meta_address)},
                                              {"required_fields", table_schema.first},
                                              {"columns_types", table_schema.second}};
-    jobject hashmap_object = JniUtil::convert_to_java_map(env, write_params);
 
     RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-
+    jobject hashmap_object = JniUtil::convert_to_java_map(env, write_params);
+    
+    // 调用Java方法写入数据
+    jclass clazz = env->GetObjectClass(_jni_connector->get_scanner_obj());
+    jmethodID write_data_method = env->GetMethodID(clazz, "writeData", "(Ljava/util/Map;)V");
+    if (write_data_method == nullptr) {
+        env->DeleteLocalRef(hashmap_object);
+        env->DeleteLocalRef(clazz);
+        return Status::InternalError("Failed to find writeData method");
+    }
+    
+    env->CallVoidMethod(_jni_connector->get_scanner_obj(), write_data_method, hashmap_object);
+    env->DeleteLocalRef(hashmap_object);
+    env->DeleteLocalRef(clazz);
+    
+    Status status = JniUtil::GetJniExceptionMsg(env);
+    if (!status.ok()) {
+        LOG(WARNING) << "Failed to write data to Trino connector: " << status.to_string();
+        return status;
+    }
+    
+    LOG(INFO) << "Successfully wrote " << num_rows << " rows to Trino connector";
     return Status::OK();
 }
 
 Status VTrinoConnectorTableWriter::finish(RuntimeState* state) {
+    if (!_jni_connector) {
+        return Status::OK();
+    }
+    
+    JNIEnv* env = nullptr;
+    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
+    
+    // 调用Java方法完成写入
+    jclass clazz = env->GetObjectClass(_jni_connector->get_scanner_obj());
+    jmethodID finish_write_method = env->GetMethodID(clazz, "finishWrite", "()V");
+    if (finish_write_method == nullptr) {
+        env->DeleteLocalRef(clazz);
+        return Status::InternalError("Failed to find finishWrite method");
+    }
+    
+    env->CallVoidMethod(_jni_connector->get_scanner_obj(), finish_write_method);
+    env->DeleteLocalRef(clazz);
+    
+    Status status = JniUtil::GetJniExceptionMsg(env);
+    if (!status.ok()) {
+        LOG(WARNING) << "Failed to finish writing to Trino connector: " << status.to_string();
+        return status;
+    }
+    
+    LOG(INFO) << "Successfully finished writing to Trino connector";
     return Status::OK();
 }
 

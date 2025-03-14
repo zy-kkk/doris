@@ -20,7 +20,7 @@ package org.apache.doris.trinoconnector;
 import org.apache.doris.common.jni.JniScanner;
 import org.apache.doris.common.jni.vec.ColumnType;
 import org.apache.doris.common.jni.vec.TableSchema;
-// import org.apache.doris.common.jni.vec.VectorTable;
+import org.apache.doris.common.jni.vec.VectorTable;
 import org.apache.doris.trinoconnector.TrinoConnectorCache.TrinoConnectorCacheKey;
 import org.apache.doris.trinoconnector.TrinoConnectorCache.TrinoConnectorCacheValue;
 
@@ -79,6 +79,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import io.trino.spi.Page;
+import io.trino.spi.PageBuilder;
 
 /**
  * TrinoConnectorJniWriter is used to write data to Trino connector.
@@ -150,7 +153,24 @@ public class TrinoConnectorJniWriter extends JniScanner {
         this.objectMapperProvider = generateObjectMapperProvider();
         initTrinoTableMetadata();
         parseRequiredTypes();
-        // todo: create sink
+        
+        try {
+            // 获取表的插入句柄
+            insertTableHandle = TrinoConnectorScannerUtils.decodeStringToObject(
+                    tableHandleString, ConnectorInsertTableHandle.class, this.objectMapperProvider);
+            
+            // 创建ConnectorPageSink
+            sink = pageSinkProvider.createPageSink(
+                    connectorTransactionHandle,
+                    session.toConnectorSession(catalogHandle),
+                    insertTableHandle,
+                    columns);
+            
+            LOG.info("Successfully created ConnectorPageSink for catalog: {}", catalogNameString);
+        } catch (Exception e) {
+            LOG.error("Failed to create ConnectorPageSink", e);
+            throw new IOException("Failed to create ConnectorPageSink", e);
+        }
     }
 
     private ConnectorPageSinkProvider getConnectorPageSinkProvider() {
@@ -179,16 +199,160 @@ public class TrinoConnectorJniWriter extends JniScanner {
     }
 
     public void writeData(Map<String, String> params) throws Exception {
-        // VectorTable table = VectorTable.createReadableTable(params);
-        // todo: write data
+        if (sink == null) {
+            throw new RuntimeException("ConnectorPageSink is not initialized");
+        }
+        
+        // 创建可读的VectorTable
+        VectorTable table = VectorTable.createReadableTable(params);
+        int numRows = table.getNumRows();
+        if (numRows == 0) {
+            LOG.info("No data to write");
+            return;
+        }
+        
+        LOG.info("Writing {} rows to Trino connector", numRows);
+        
+        try {
+            // 创建PageBuilder
+            PageBuilder pageBuilder = new PageBuilder(trinoTypeList);
+            
+            // 将VectorTable中的数据转换为Page
+            for (int rowIdx = 0; rowIdx < numRows; rowIdx++) {
+                pageBuilder.declarePosition();
+                
+                for (int colIdx = 0; colIdx < fields.length; colIdx++) {
+                    // 获取列数据
+                    Object value = getValueFromVectorTable(table, colIdx, rowIdx);
+                    
+                    // 将值写入PageBuilder
+                    appendValueToPageBuilder(pageBuilder, colIdx, value);
+                }
+            }
+            
+            // 构建Page并写入
+            Page page = pageBuilder.build();
+            sink.appendPage(page);
+            
+            LOG.info("Successfully wrote {} rows to Trino connector", numRows);
+        } catch (Exception e) {
+            LOG.error("Failed to write data to Trino connector", e);
+            printException(e);
+            throw e;
+        }
     }
 
     public void finishWrite() throws Exception {
-
+        if (sink == null) {
+            LOG.warn("ConnectorPageSink is not initialized, nothing to finish");
+            return;
+        }
+        
+        try {
+            // 完成写入
+            sink.finish();
+            LOG.info("Successfully finished writing to Trino connector");
+        } catch (Exception e) {
+            LOG.error("Failed to finish writing to Trino connector", e);
+            printException(e);
+            throw e;
+        }
     }
 
     @Override
     public void close() throws IOException {
+        if (sink != null) {
+            try {
+                sink.abort();
+            } catch (Exception e) {
+                LOG.warn("Failed to abort ConnectorPageSink", e);
+            }
+        }
+    }
+
+    // 从VectorTable获取值
+    private Object getValueFromVectorTable(VectorTable table, int colIdx, int rowIdx) {
+        if (table.getColumn(colIdx).isNullAt(rowIdx)) {
+            return null;
+        }
+        
+        ColumnType.Type dorisType = table.getColumnType(colIdx).getType();
+        switch (dorisType) {
+            case BOOLEAN:
+                return table.getColumn(colIdx).getBoolean(rowIdx);
+            case TINYINT:
+                return table.getColumn(colIdx).getByte(rowIdx);
+            case SMALLINT:
+                return table.getColumn(colIdx).getShort(rowIdx);
+            case INT:
+                return table.getColumn(colIdx).getInt(rowIdx);
+            case BIGINT:
+                return table.getColumn(colIdx).getLong(rowIdx);
+            case LARGEINT:
+                return table.getColumn(colIdx).getBigInteger(rowIdx);
+            case FLOAT:
+                return table.getColumn(colIdx).getFloat(rowIdx);
+            case DOUBLE:
+                return table.getColumn(colIdx).getDouble(rowIdx);
+            case DECIMALV2:
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
+                return table.getColumn(colIdx).getDecimal(rowIdx);
+            case DATEV2:
+                return table.getColumn(colIdx).getDate(rowIdx);
+            case DATETIMEV2:
+                return table.getColumn(colIdx).getDateTime(rowIdx);
+            case CHAR:
+            case VARCHAR:
+            case STRING:
+            case BINARY:
+                return table.getColumn(colIdx).getStringWithOffset(rowIdx);
+            default:
+                throw new RuntimeException("Unsupported type: " + dorisType);
+        }
+    }
+
+    // 将值写入PageBuilder
+    private void appendValueToPageBuilder(PageBuilder pageBuilder, int colIdx, Object value) {
+        if (value == null) {
+            pageBuilder.getBlockBuilder(colIdx).appendNull();
+            return;
+        }
+        
+        Type trinoType = trinoTypeList.get(colIdx);
+        String typeName = trinoType.getDisplayName();
+        
+        if (typeName.equals("boolean")) {
+            trinoType.writeBoolean(pageBuilder.getBlockBuilder(colIdx), (Boolean) value);
+        } else if (typeName.equals("tinyint")) {
+            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+        } else if (typeName.equals("smallint")) {
+            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+        } else if (typeName.equals("integer")) {
+            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+        } else if (typeName.equals("bigint")) {
+            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+        } else if (typeName.startsWith("decimal")) {
+            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+        } else if (typeName.equals("real")) {
+            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), 
+                    Float.floatToIntBits(((Number) value).floatValue()));
+        } else if (typeName.equals("double")) {
+            trinoType.writeDouble(pageBuilder.getBlockBuilder(colIdx), ((Number) value).doubleValue());
+        } else if (typeName.equals("date")) {
+            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+        } else if (typeName.startsWith("timestamp")) {
+            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+        } else if (typeName.equals("varchar") || typeName.equals("char")) {
+            trinoType.writeSlice(pageBuilder.getBlockBuilder(colIdx), 
+                    io.airlift.slice.Slices.utf8Slice(value.toString()));
+        } else if (typeName.equals("varbinary")) {
+            trinoType.writeSlice(pageBuilder.getBlockBuilder(colIdx), 
+                    io.airlift.slice.Slices.wrappedBuffer(value.toString().getBytes()));
+        } else {
+            throw new RuntimeException("Unsupported Trino type: " + typeName);
+        }
     }
 
     @Override
