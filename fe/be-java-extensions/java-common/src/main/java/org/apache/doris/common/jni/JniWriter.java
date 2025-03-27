@@ -15,12 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package org.apache.doris.transaction;
+package org.apache.doris.common.jni;
 
-public enum TransactionType {
-    UNKNOWN,
-    HMS,
-    ICEBERG,
-    JDBC,
-    TRINO_CONNECTOR
+import org.apache.doris.common.jni.vec.ColumnType;
+
+import java.io.IOException;
+import java.util.Map;
+
+public abstract class JniWriter {
+    protected String[] fields;
+    protected ColumnType[] types;
+
+    // Initialize JniWriter
+    public abstract void open() throws IOException;
+
+    // Close JniWriter and release resources
+    public abstract void close() throws IOException;
+
+    // Write data to the writer
+    public abstract void write(Map<String, String> params) throws IOException;
+
+    // Finish writing data
+    public abstract void finish() throws Exception;
 }
