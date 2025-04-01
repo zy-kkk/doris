@@ -204,6 +204,7 @@ public:
             : _connector_class(std::move(connector_class)),
               _scanner_params(std::move(scanner_params)) {
         _is_table_schema = true;
+        _connector_name = split(_connector_class, "/").back();
     }
 
     ~JniConnector() override = default;

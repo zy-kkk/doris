@@ -153,21 +153,60 @@ Status JniConnector::get_table_schema(std::string& table_schema_str) {
 }
 
 std::map<std::string, std::string> JniConnector::get_statistics(JNIEnv* env) {
-    jobject metrics = env->CallObjectMethod(_jni_object, _jni_get_statistics);
-    jthrowable exc = (env)->ExceptionOccurred();
-    if (exc != nullptr) {
-        LOG(WARNING) << "get_statistics has error: "
-                     << JniUtil::GetJniExceptionMsg(env).to_string();
-        env->DeleteLocalRef(metrics);
+    LOG(WARNING) << "Entering get_statistics for " << _connector_name;
+
+    if (_jni_get_statistics == nullptr) {
+        LOG(WARNING) << "get_statistics method ID is null";
         return std::map<std::string, std::string> {};
     }
-    std::map<std::string, std::string> result = JniUtil::convert_to_cpp_map(env, metrics);
-    env->DeleteLocalRef(metrics);
-    return result;
+
+    if (_jni_object == nullptr) {
+        LOG(WARNING) << "JNI object is null";
+        return std::map<std::string, std::string> {};
+    }
+
+    try {
+        LOG(WARNING) << "Calling CallObjectMethod for getStatistics";
+        jobject metrics = env->CallObjectMethod(_jni_object, _jni_get_statistics);
+
+        if (env->ExceptionCheck()) {
+            LOG(WARNING) << "Exception occurred in get_statistics: "
+                         << JniUtil::GetJniExceptionMsg(env).to_string();
+            env->ExceptionClear();
+            if (metrics != nullptr) {
+                env->DeleteLocalRef(metrics);
+            }
+            return std::map<std::string, std::string> {};
+        }
+
+        if (metrics == nullptr) {
+            LOG(WARNING) << "getStatistics returned null";
+            return std::map<std::string, std::string> {};
+        }
+
+        LOG(WARNING) << "Converting Java map to C++ map";
+        std::map<std::string, std::string> result = JniUtil::convert_to_cpp_map(env, metrics);
+        LOG(WARNING) << "Converted map size: " << result.size();
+
+        env->DeleteLocalRef(metrics);
+        return result;
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "Exception in get_statistics: " << e.what();
+        return std::map<std::string, std::string> {};
+    } catch (...) {
+        LOG(WARNING) << "Unknown exception in get_statistics";
+        return std::map<std::string, std::string> {};
+    }
 }
 
 Status JniConnector::close() {
+    LOG(WARNING) << "Entering JniConnector::close() for " << _connector_name;
+
     if (!_closed) {
+        LOG(WARNING) << "About to call _collect_profile_before_close() for " << _connector_name;
+        _collect_profile_before_close();
+        LOG(WARNING) << "Returned from _collect_profile_before_close() for " << _connector_name;
+
         JNIEnv* env = nullptr;
         RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
         if (_jni_object_initialized && _jni_object != nullptr) {
@@ -753,39 +792,144 @@ std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* bloc
 }
 
 void JniConnector::_collect_profile_before_close() {
-    if (_jni_object_initialized && _profile != nullptr) {
-        JNIEnv* env = nullptr;
-        Status st = JniUtil::GetJNIEnv(&env);
-        if (!st) {
-            LOG(WARNING) << "failed to get jni env when collect profile: " << st;
+    LOG(WARNING) << "Entering JniConnector::_collect_profile_before_close() for "
+                 << _connector_name;
+
+    // 第一步：检查初始条件
+    if (!_jni_object_initialized || _profile == nullptr) {
+        LOG(WARNING) << "Skipping profile collection: _jni_object_initialized="
+                     << _jni_object_initialized
+                     << ", _profile=" << (_profile != nullptr ? "valid" : "nullptr");
+        return;
+    }
+
+    LOG(WARNING) << "Step 1: Getting JNIEnv";
+    JNIEnv* env = nullptr;
+    Status st = JniUtil::GetJNIEnv(&env);
+    if (!st) {
+        LOG(WARNING) << "Failed to get jni env: " << st;
+        return;
+    }
+    LOG(WARNING) << "Step 2: Got JNIEnv successfully";
+
+    // 检查 _jni_object 和 _jni_get_statistics
+    LOG(WARNING) << "Step 3: Checking _jni_object (address: " << _jni_object
+                 << ") and _jni_get_statistics (address: " << _jni_get_statistics << ")";
+
+    // 安全检查 _jni_get_statistics
+    if (_jni_get_statistics == nullptr) {
+        LOG(WARNING) << "Skip calling get_statistics because _jni_get_statistics is null";
+        return;
+    }
+
+    try {
+        LOG(WARNING) << "Step 4: About to call get_statistics";
+        jobject metrics = env->CallObjectMethod(_jni_object, _jni_get_statistics);
+        LOG(WARNING) << "Step 5: Returned from CallObjectMethod, checking for exceptions";
+
+        if (env->ExceptionCheck()) {
+            LOG(WARNING) << "Java exception occurred after get_statistics: "
+                         << JniUtil::GetJniExceptionMsg(env).to_string();
+            env->ExceptionClear();
+            env->DeleteLocalRef(metrics);
             return;
         }
-        // update scanner metrics
-        for (const auto& metric : get_statistics(env)) {
-            std::vector<std::string> type_and_name = split(metric.first, ":");
-            if (type_and_name.size() != 2) {
-                LOG(WARNING) << "Name of JNI Scanner metric should be pattern like "
-                             << "'metricType:metricName'";
-                continue;
-            }
-            long metric_value = std::stol(metric.second);
-            RuntimeProfile::Counter* scanner_counter;
-            if (type_and_name[0] == "timer") {
-                scanner_counter =
-                        ADD_CHILD_TIMER(_profile, type_and_name[1], _connector_name.c_str());
-            } else if (type_and_name[0] == "counter") {
-                scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::UNIT,
-                                                    _connector_name.c_str());
-            } else if (type_and_name[0] == "bytes") {
-                scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::BYTES,
-                                                    _connector_name.c_str());
-            } else {
-                LOG(WARNING) << "Type of JNI Scanner metric should be timer, counter or bytes";
-                continue;
-            }
-            COUNTER_UPDATE(scanner_counter, metric_value);
+        LOG(WARNING) << "Step 6: No exceptions, metrics object: " << metrics;
+
+        if (metrics == nullptr) {
+            LOG(WARNING) << "get_statistics returned null, skipping conversion";
+            return;
         }
+
+        LOG(WARNING) << "Step 7: Converting Java map to C++ map";
+        std::map<std::string, std::string> cpp_map;
+        try {
+            cpp_map = JniUtil::convert_to_cpp_map(env, metrics);
+            LOG(WARNING) << "Step 8: Conversion successful, map size: " << cpp_map.size();
+        } catch (const std::exception& e) {
+            LOG(WARNING) << "Exception during map conversion: " << e.what();
+            env->DeleteLocalRef(metrics);
+            return;
+        }
+
+        env->DeleteLocalRef(metrics);
+
+        if (cpp_map.empty()) {
+            LOG(WARNING) << "Statistics map is empty, nothing to process";
+            return;
+        }
+
+        LOG(WARNING) << "Step 9: Processing " << cpp_map.size() << " metrics";
+        for (const auto& metric : cpp_map) {
+            LOG(WARNING) << "  Processing metric: " << metric.first << " = " << metric.second;
+
+            try {
+                std::vector<std::string> type_and_name = split(metric.first, ":");
+                if (type_and_name.size() != 2) {
+                    LOG(WARNING) << "Invalid metric name format: " << metric.first;
+                    continue;
+                }
+
+                LOG(WARNING) << "  Parsed type: " << type_and_name[0]
+                             << ", name: " << type_and_name[1];
+
+                long metric_value;
+                try {
+                    metric_value = std::stol(metric.second);
+                    LOG(WARNING) << "  Converted value: " << metric_value;
+                } catch (const std::exception& e) {
+                    LOG(WARNING) << "  Failed to convert value: " << e.what();
+                    continue;
+                }
+
+                LOG(WARNING) << "  Creating counter of type: " << type_and_name[0];
+                RuntimeProfile::Counter* scanner_counter = nullptr;
+
+                try {
+                    if (type_and_name[0] == "timer") {
+                        scanner_counter = ADD_CHILD_TIMER(_profile, type_and_name[1],
+                                                          _connector_name.c_str());
+                    } else if (type_and_name[0] == "counter") {
+                        scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::UNIT,
+                                                            _connector_name.c_str());
+                    } else if (type_and_name[0] == "bytes") {
+                        scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1],
+                                                            TUnit::BYTES, _connector_name.c_str());
+                    } else {
+                        LOG(WARNING) << "  Unknown metric type: " << type_and_name[0];
+                        continue;
+                    }
+                    LOG(WARNING) << "  Counter created successfully";
+                } catch (const std::exception& e) {
+                    LOG(WARNING) << "  Exception creating counter: " << e.what();
+                    continue;
+                }
+
+                if (scanner_counter == nullptr) {
+                    LOG(WARNING) << "  Failed to create counter";
+                    continue;
+                }
+
+                LOG(WARNING) << "  Updating counter value to: " << metric_value;
+                try {
+                    COUNTER_UPDATE(scanner_counter, metric_value);
+                    LOG(WARNING) << "  Counter updated successfully";
+                } catch (const std::exception& e) {
+                    LOG(WARNING) << "  Exception updating counter: " << e.what();
+                }
+            } catch (const std::exception& e) {
+                LOG(WARNING) << "  Unexpected exception processing metric: " << e.what();
+            }
+        }
+
+        LOG(WARNING) << "Step 10: Finished processing all metrics";
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "Unexpected exception in _collect_profile_before_close: " << e.what();
+    } catch (...) {
+        LOG(WARNING) << "Unknown exception in _collect_profile_before_close";
     }
+
+    LOG(WARNING) << "Exiting JniConnector::_collect_profile_before_close() for " << _connector_name;
 }
 
 Status JniConnector::open_writer(RuntimeState* state, RuntimeProfile* profile) {
