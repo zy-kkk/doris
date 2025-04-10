@@ -27,6 +27,7 @@ import com.fasterxml.jackson.databind.Module;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import io.airlift.json.ObjectMapperProvider;
 import io.airlift.slice.Slice;
 import io.trino.Session;
@@ -127,6 +128,8 @@ public class TrinoConnectorJniWriter extends JniWriter {
 
     private ConnectorMetadata metadata;
 
+    private boolean pageSinkInitialized = false;
+
     public TrinoConnectorJniWriter(Map<String, String> params) {
         catalogNameString = params.get("catalog_name");
         tableHandleString = params.get("trino_connector_table_handle");
@@ -159,58 +162,99 @@ public class TrinoConnectorJniWriter extends JniWriter {
                 printException(e);
             }
 
-            try {
-                connectorTransactionHandle = connector.beginTransaction(
-                        io.trino.spi.transaction.IsolationLevel.READ_UNCOMMITTED,
-                        true,
-                        true);
-                LOG.info("Created new transaction handle: {}", connectorTransactionHandle);
-
-                ConnectorSession connectorSession = session.toConnectorSession(catalogHandle);
-                metadata = connector.getMetadata(connectorSession, connectorTransactionHandle);
-                if (metadata == null) {
-                    throw new IOException("Failed to get connector metadata");
-                }
-
-                insertTableHandle = metadata.beginInsert(
-                        connectorSession,
-                        connectorTableHandle,
-                        columns,
-                        io.trino.spi.connector.RetryMode.NO_RETRIES);
-
-                if (insertTableHandle == null) {
-                    throw new IOException("Failed to begin insert operation, received null InsertTableHandle");
-                }
-
-                LOG.info("Successfully created InsertTableHandle: {}", insertTableHandle.getClass().getName());
-            } catch (Exception e) {
-                LOG.error("Failed to create InsertTableHandle", e);
-                printException(e);
-                throw new IOException("Failed to create InsertTableHandle: " + e.getMessage(), e);
-            }
-
-            try {
-                sink = pageSinkProvider.createPageSink(
-                        connectorTransactionHandle,
-                        session.toConnectorSession(catalogHandle),
-                        insertTableHandle,
-                        new ConnectorPageSinkId() {
-                            @Override
-                            public long getId() {
-                                return 0;
-                            }
-                        });
-            } catch (Exception e) {
-                printException(e);
-                throw e;
-            }
-
-            LOG.info("Successfully created ConnectorPageSink for catalog: {}", catalogNameString);
+            LOG.info("Successfully initialized Trino connector for catalog: {}", catalogNameString);
         } catch (Exception e) {
-            LOG.error("Failed to create ConnectorPageSink", e);
+            LOG.error("Failed to initialize Trino connector", e);
             printException(e);
-            throw new IOException("Failed to create ConnectorPageSink: " + e.getMessage(), e);
+            throw new IOException("Failed to initialize Trino connector: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 初始化PageSink，延迟到实际需要写入时创建，确保与实际写入列匹配
+     */
+    private void initPageSink(String[] requiredFields) throws IOException {
+        if (pageSinkInitialized) {
+            return;
+        }
+
+        try {
+            connectorTransactionHandle = connector.beginTransaction(
+                    io.trino.spi.transaction.IsolationLevel.READ_UNCOMMITTED,
+                    true,
+                    true);
+            LOG.info("Created new transaction handle: {}", connectorTransactionHandle);
+
+            ConnectorSession connectorSession = session.toConnectorSession(catalogHandle);
+            metadata = connector.getMetadata(connectorSession, connectorTransactionHandle);
+            if (metadata == null) {
+                throw new IOException("Failed to get connector metadata");
+            }
+
+            List<ColumnHandle> selectedColumns = selectColumnsForInsert(requiredFields);
+
+            insertTableHandle = metadata.beginInsert(
+                    connectorSession,
+                    connectorTableHandle,
+                    selectedColumns,
+                    io.trino.spi.connector.RetryMode.NO_RETRIES);
+
+            if (insertTableHandle == null) {
+                throw new IOException("Failed to begin insert operation, received null InsertTableHandle");
+            }
+
+            LOG.info("Successfully created InsertTableHandle: {}", insertTableHandle.getClass().getName());
+
+            sink = pageSinkProvider.createPageSink(
+                    connectorTransactionHandle,
+                    session.toConnectorSession(catalogHandle),
+                    insertTableHandle,
+                    new ConnectorPageSinkId() {
+                        @Override
+                        public long getId() {
+                            return 0;
+                        }
+                    });
+
+            pageSinkInitialized = true;
+            LOG.info("Successfully created ConnectorPageSink for table {} with required fields: {}",
+                    tableHandleString, Arrays.toString(requiredFields));
+        } catch (Exception e) {
+            LOG.error("Failed to create PageSink", e);
+            printException(e);
+            throw new IOException("Failed to create PageSink: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 根据需要写入的字段名选择对应的ColumnHandle
+     */
+    private List<ColumnHandle> selectColumnsForInsert(String[] requiredFields) {
+        List<ColumnHandle> selectedColumns = Lists.newArrayList();
+
+        if (requiredFields == null || requiredFields.length == 0) {
+            return columns;
+        }
+
+        Map<String, ColumnHandle> nameToHandleMap = Maps.newHashMap();
+        for (int i = 0; i < trinoConnectorAllFieldNames.size(); i++) {
+            nameToHandleMap.put(trinoConnectorAllFieldNames.get(i), columns.get(i));
+        }
+
+        for (String fieldName : requiredFields) {
+            ColumnHandle handle = nameToHandleMap.get(fieldName);
+            if (handle != null) {
+                selectedColumns.add(handle);
+            } else {
+                LOG.warn("Required field {} not found in available columns", fieldName);
+            }
+        }
+
+        if (selectedColumns.isEmpty()) {
+            LOG.warn("No matching columns found, using all columns");
+            return columns;
+        }
+        return selectedColumns;
     }
 
     private ConnectorPageSinkProvider getConnectorPageSinkProvider() {
@@ -225,53 +269,17 @@ public class TrinoConnectorJniWriter extends JniWriter {
         return connectorPageSinkProvider;
     }
 
-    private void parseRequiredTypes() {
-        if (fields == null || fields.length == 0) {
-            fields = trinoConnectorAllFieldNames.toArray(new String[0]);
-        }
-
-        trinoTypeList = Lists.newArrayList();
-        for (int i = 0; i < fields.length; i++) {
-            int index = trinoConnectorAllFieldNames.indexOf(fields[i]);
-            if (index == -1) {
-                throw new RuntimeException(String.format("Cannot find field %s in schema %s",
-                        fields[i], trinoConnectorAllFieldNames));
-            }
-            trinoTypeList.add(columnMetadataList.get(index).getType());
-        }
-    }
-
     @Override
     public void write(Map<String, String> params) throws IOException {
-        if (sink == null) {
-            throw new RuntimeException("ConnectorPageSink is not initialized");
+        if (pageSinkProvider == null) {
+            throw new RuntimeException("ConnectorPageSink provider is not initialized");
         }
 
         if (!params.containsKey("meta_address")) {
             throw new RuntimeException("Missing meta_address in params");
         }
 
-        if (!params.containsKey("required_fields") || !params.containsKey("columns_types")) {
-            StringBuilder requiredFields = new StringBuilder();
-            StringBuilder columnsTypes = new StringBuilder();
-
-            for (int i = 0; i < fields.length; i++) {
-                if (i > 0) {
-                    requiredFields.append(",");
-                    columnsTypes.append("#");
-                }
-                requiredFields.append(fields[i]);
-
-                Type trinoType = trinoTypeList.get(i);
-                String typeName = trinoType.getDisplayName();
-                String dorisType = mapTrinoTypeToDorisType(typeName);
-                columnsTypes.append(dorisType);
-            }
-
-            params.put("required_fields", requiredFields.toString());
-            params.put("columns_types", columnsTypes.toString());
-        }
-
+        // 先创建读表
         vectorTable = VectorTable.createReadableTable(params);
         int numRows = vectorTable.getNumRows();
         if (numRows == 0) {
@@ -282,10 +290,53 @@ public class TrinoConnectorJniWriter extends JniWriter {
         LOG.info("Writing {} rows to Trino connector", numRows);
 
         try {
-            if (fields == null || fields.length == 0) {
+            // 处理需要写入的字段信息
+            String requiredFieldsString = params.get("required_fields");
+
+            String[] requiredFields;
+            if (requiredFieldsString != null) {
+                LOG.info("Required fields from params: {}", requiredFieldsString);
+                String[] originalFields = requiredFieldsString.split(",");
+
+                // 检查是否使用了_col_N格式，若是则转换为实际列名
+                boolean usingColIndexFormat = originalFields[0].startsWith("_col_");
+
+                if (usingColIndexFormat) {
+                    requiredFields = new String[originalFields.length];
+                    for (int i = 0; i < originalFields.length; i++) {
+                        String field = originalFields[i];
+                        try {
+                            // 从"_col_N"格式中提取N，注意这里N是arguments[i]
+                            // 不一定是连续的或从0开始的索引
+                            int colIndex = Integer.parseInt(field.substring(5));
+
+                            // 这里应该直接使用colIndex作为索引，而不是尝试转换
+                            if (colIndex >= 0 && colIndex < trinoConnectorAllFieldNames.size()) {
+                                requiredFields[i] = trinoConnectorAllFieldNames.get(colIndex);
+                                LOG.info("Mapped column index {} to field name {}", colIndex, requiredFields[i]);
+                            } else {
+                                throw new RuntimeException("Column index out of bounds: " + colIndex
+                                        + ", size: " + trinoConnectorAllFieldNames.size());
+                            }
+                        } catch (NumberFormatException e) {
+                            throw new RuntimeException("Invalid column format: " + field);
+                        }
+                    }
+                    LOG.info("Mapped column indexes to field names: {}", Arrays.toString(requiredFields));
+                } else {
+                    requiredFields = originalFields;
+                }
+
+                fields = requiredFields;
+            } else if (fields == null || fields.length == 0) {
                 fields = trinoConnectorAllFieldNames.toArray(new String[0]);
-                parseRequiredTypes();
             }
+
+            // 延迟初始化PageSink，确保使用正确的列集合
+            initPageSink(fields);
+
+            // 解析需要的类型
+            parseRequiredTypes();
 
             PageBuilder pageBuilder = new PageBuilder(trinoTypeList);
 
@@ -294,7 +345,6 @@ public class TrinoConnectorJniWriter extends JniWriter {
 
                 for (int colIdx = 0; colIdx < fields.length; colIdx++) {
                     Object value = getValueFromVectorTable(vectorTable, colIdx, rowIdx);
-
                     appendValueToPageBuilder(pageBuilder, colIdx, value);
                 }
             }
@@ -305,7 +355,36 @@ public class TrinoConnectorJniWriter extends JniWriter {
             LOG.info("Successfully wrote {} rows to Trino connector", numRows);
         } catch (Exception e) {
             LOG.warn("Failed to write data to Trino connector", e);
+            throw new IOException("Failed to write data: " + e.getMessage(), e);
         }
+    }
+
+    private void parseRequiredTypes() {
+        if (fields == null || fields.length == 0) {
+            fields = trinoConnectorAllFieldNames.toArray(new String[0]);
+        }
+
+        // 重新创建类型列表，确保与fields顺序一致
+        trinoTypeList = Lists.newArrayList();
+        Map<String, Type> nameToTypeMap = Maps.newHashMap();
+
+        // 创建字段名到类型的映射
+        for (int i = 0; i < trinoConnectorAllFieldNames.size(); i++) {
+            nameToTypeMap.put(trinoConnectorAllFieldNames.get(i), columnMetadataList.get(i).getType());
+        }
+
+        for (String field : fields) {
+            Type type = nameToTypeMap.get(field);
+            if (type == null) {
+                throw new RuntimeException(String.format("Cannot find field %s in schema %s",
+                        field, trinoConnectorAllFieldNames));
+            }
+            trinoTypeList.add(type);
+        }
+
+        LOG.info("Parsed required types for fields: {}", Arrays.toString(fields));
+        LOG.info("Fields will be mapped to these types: {}",
+                trinoTypeList.stream().map(Type::getDisplayName).collect(Collectors.toList()));
     }
 
     @Override
