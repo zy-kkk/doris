@@ -39,6 +39,7 @@ import org.semver4j.Semver;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -78,7 +79,7 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
     protected int batchSizeNum = 0;
     protected int curBlockRows = 0;
     protected String jdbcDriverVersion;
-    private static final Map<URL, ClassLoader> classLoaderMap = Maps.newConcurrentMap();
+    private static final Map<URL, WeakReference<ClassLoader>> classLoaderMap = Maps.newConcurrentMap();
 
     public BaseJdbcExecutor(byte[] thriftParams) throws Exception {
         setJdbcDriverSystemProperties();
@@ -368,6 +369,11 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
                 try {
                     URL url = new URL(config.getJdbcDriverUrl());
                     classLoaderMap.remove(url);
+                    if (hikariDataSource != null) {
+                        hikariDataSource.close();
+                        JdbcDataSource.getDataSource().getSourcesMap().remove(config.createCacheKey());
+                        hikariDataSource = null;
+                    }
                     // Prompt user to verify driver validity and retry
                     throw new JdbcExecutorException(
                         String.format("Failed to load driver class `%s`. "
@@ -386,18 +392,22 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
     private synchronized void initializeClassLoader(JdbcDataSourceConfig config) {
         try {
             URL[] urls = {new URL(config.getJdbcDriverUrl())};
-            if (classLoaderMap.containsKey(urls[0]) && classLoaderMap.get(urls[0]) != null) {
-                this.classLoader = classLoaderMap.get(urls[0]);
-            } else {
-                String expectedChecksum = config.getJdbcDriverChecksum();
-                String actualChecksum = computeObjectChecksum(urls[0].toString(), null);
-                if (!expectedChecksum.equals(actualChecksum)) {
-                    throw new RuntimeException("Checksum mismatch for JDBC driver.");
+            WeakReference<ClassLoader> ref = classLoaderMap.get(urls[0]);
+            if (ref != null) {
+                ClassLoader cached = ref.get();
+                if (cached != null) {
+                    this.classLoader = cached;
+                    return;
                 }
-                ClassLoader parent = getClass().getClassLoader();
-                this.classLoader = URLClassLoader.newInstance(urls, parent);
-                classLoaderMap.put(urls[0], this.classLoader);
             }
+            String expectedChecksum = config.getJdbcDriverChecksum();
+            String actualChecksum = computeObjectChecksum(urls[0].toString(), null);
+            if (!expectedChecksum.equals(actualChecksum)) {
+                throw new RuntimeException("Checksum mismatch for JDBC driver.");
+            }
+            ClassLoader parent = getClass().getClassLoader();
+            this.classLoader = URLClassLoader.newInstance(urls, parent);
+            classLoaderMap.put(urls[0], new WeakReference<>(this.classLoader));
         } catch (MalformedURLException e) {
             throw new RuntimeException("Failed to load JDBC driver from path: "
                     + config.getJdbcDriverUrl(), e);

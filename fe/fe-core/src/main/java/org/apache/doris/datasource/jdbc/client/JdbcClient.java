@@ -33,6 +33,7 @@ import lombok.Getter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.lang.ref.WeakReference;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -57,7 +58,7 @@ public abstract class JdbcClient {
     private static final int HTTP_TIMEOUT_MS = 10000;
     protected static final int JDBC_DATETIME_SCALE = 6;
 
-    private static final Map<URL, ClassLoader> classLoaderMap = new ConcurrentHashMap<>();
+    private static final Map<URL, WeakReference<ClassLoader>> classLoaderMap = new ConcurrentHashMap<>();
 
     private String catalogName;
     protected String dbType;
@@ -149,6 +150,8 @@ public abstract class JdbcClient {
             if (msg != null && msg.contains("Failed to load driver class")) {
                 try {
                     URL url = new URL(JdbcResource.getFullDriverUrl(config.getDriverUrl()));
+                    dataSource.close();
+                    dataSource = null;
                     classLoaderMap.remove(url);
                     // Prompt user to verify driver validity and retry
                     throw new JdbcClientException(
@@ -167,13 +170,15 @@ public abstract class JdbcClient {
 
     private synchronized void initializeClassLoader(JdbcClientConfig config) {
         try {
-            URL[] urls = {new URL(JdbcResource.getFullDriverUrl(config.getDriverUrl()))};
-            if (classLoaderMap.containsKey(urls[0]) && classLoaderMap.get(urls[0]) != null) {
-                this.classLoader = classLoaderMap.get(urls[0]);
+            URL url = new URL(JdbcResource.getFullDriverUrl(config.getDriverUrl()));
+            WeakReference<ClassLoader> ref = classLoaderMap.get(url);
+            ClassLoader cached = (ref != null) ? ref.get() : null;
+            if (cached != null) {
+                this.classLoader = cached;
             } else {
                 ClassLoader parent = getClass().getClassLoader();
-                this.classLoader = URLClassLoader.newInstance(urls, parent);
-                classLoaderMap.put(urls[0], this.classLoader);
+                this.classLoader = URLClassLoader.newInstance(new URL[] {url}, parent);
+                classLoaderMap.put(url, new WeakReference<>(this.classLoader));
             }
         } catch (MalformedURLException e) {
             throw new RuntimeException("Failed to load JDBC driver from path: "
