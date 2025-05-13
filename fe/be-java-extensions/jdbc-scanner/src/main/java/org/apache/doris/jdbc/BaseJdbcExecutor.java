@@ -227,12 +227,9 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
 
             for (int i = 0; i < columnCount; ++i) {
                 ColumnType type = outputTable.getColumnType(i);
-                Object[] columnData = block.get(i);
-                Class<?> componentType = columnData.getClass().getComponentType();
-                Object[] newColumn = (Object[]) Array.newInstance(componentType, curBlockRows);
-                System.arraycopy(columnData, 0, newColumn, 0, curBlockRows);
                 boolean isNullable = Boolean.parseBoolean(nullableList[i]);
-                outputTable.appendData(i, newColumn, getOutputConverter(type, replaceStringList[i]), isNullable);
+                outputTable.appendData(i, block.get(i), getOutputConverter(type, replaceStringList[i]), isNullable, 0,
+                        curBlockRows);
             }
         } catch (Exception e) {
             LOG.warn("jdbc get block address exception: ", e);
@@ -370,9 +367,9 @@ public abstract class BaseJdbcExecutor implements JdbcExecutor {
                     classLoaderMap.remove(url);
                     // Prompt user to verify driver validity and retry
                     throw new JdbcExecutorException(
-                        String.format("Failed to load driver class `%s`. "
-                                        + "Please check that the driver JAR is valid and retry.",
-                                      config.getJdbcDriverClass()), e);
+                            String.format("Failed to load driver class `%s`. "
+                                            + "Please check that the driver JAR is valid and retry.",
+                                    config.getJdbcDriverClass()), e);
                 } catch (MalformedURLException ignore) {
                     // ignore invalid URL when cleaning cache
                 }
