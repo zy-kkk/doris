@@ -580,7 +580,7 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
         }
 
         TrinoConnectorTableSink sink = new TrinoConnectorTableSink(
-                ((TrinoConnectorExternalTable) trinoConnectorTableSink.getTargetTable())
+                ((TrinoConnectorExternalTable) trinoConnectorTableSink.getTargetTable()), targetTableColumns
         );
         rootFragment.setSink(sink);
         return rootFragment;

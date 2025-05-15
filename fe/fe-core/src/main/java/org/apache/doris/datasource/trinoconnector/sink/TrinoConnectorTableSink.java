@@ -18,6 +18,7 @@
 package org.apache.doris.datasource.trinoconnector.sink;
 
 
+import org.apache.doris.catalog.Column;
 import org.apache.doris.datasource.trinoconnector.TrinoConnectorExternalCatalog;
 import org.apache.doris.datasource.trinoconnector.TrinoConnectorExternalTable;
 import org.apache.doris.datasource.trinoconnector.TrinoConnectorPluginLoader;
@@ -58,13 +59,15 @@ import java.util.Set;
 public class TrinoConnectorTableSink extends BaseExternalTableDataSink {
     private static final Logger LOG = LogManager.getLogger(TrinoConnectorTableSink.class);
     private final TrinoConnectorExternalTable targetTable;
+    private final List<Column> targetColumns;
     private ObjectMapperProvider objectMapperProvider;
     private static final HashSet<TFileFormatType> supportedTypes = new HashSet<TFileFormatType>() {{
             add(TFileFormatType.FORMAT_JNI);
         }};
 
-    public TrinoConnectorTableSink(TrinoConnectorExternalTable targetTable) {
+    public TrinoConnectorTableSink(TrinoConnectorExternalTable targetTable, List<Column> targetColumns) {
         this.targetTable = targetTable;
+        this.targetColumns = targetColumns;
     }
 
     @Override
@@ -87,29 +90,41 @@ public class TrinoConnectorTableSink extends BaseExternalTableDataSink {
         objectMapperProvider = createObjectMapperProvider();
         TTrinoConnnectorTableSink tTrinoConnectorTableSink = new TTrinoConnnectorTableSink();
 
-        // Set basic table information
         tTrinoConnectorTableSink.setCatalogName(targetTable.getCatalog().getName());
         tTrinoConnectorTableSink.setDbName(targetTable.getDbName());
         tTrinoConnectorTableSink.setTableName(targetTable.getName());
 
         TrinoConnectorExternalCatalog catalog = (TrinoConnectorExternalCatalog) targetTable.getCatalog();
 
-        // Set Trino connector options
         tTrinoConnectorTableSink.setTrinoConnectorOptions(catalog.getTrinoConnectorPropertiesWithCreateTime());
 
         tTrinoConnectorTableSink.setTrinoConnectorTableHandle(encodeObjectToString(
                 targetTable.getConnectorTableHandle(), objectMapperProvider
         ));
 
-        Map<String, ColumnHandle> columnHandleMap = targetTable.getColumnHandleMap();
-        Map<String, ColumnMetadata> columnMetadataMap = targetTable.getColumnMetadataMap();
+        Map<String, ColumnHandle> allColumnHandlesMap = targetTable.getColumnHandleMap();
+        Map<String, ColumnMetadata> allColumnMetadataMap = targetTable.getColumnMetadataMap();
+
         List<ColumnHandle> columnHandles = new ArrayList<>();
         List<ColumnMetadata> columnMetadataList = new ArrayList<>();
-        for (Map.Entry<String, ColumnHandle> entry : columnHandleMap.entrySet()) {
-            columnHandles.add(entry.getValue());
-        }
-        for (Map.Entry<String, ColumnMetadata> entry : columnMetadataMap.entrySet()) {
-            columnMetadataList.add(entry.getValue());
+
+        if (targetColumns != null && !targetColumns.isEmpty()) {
+            for (Column column : targetColumns) {
+                String columnName = column.getName().toLowerCase();
+                ColumnHandle handle = allColumnHandlesMap.get(columnName);
+                ColumnMetadata metadata = allColumnMetadataMap.get(columnName);
+
+                if (handle == null || metadata == null) {
+                    throw new AnalysisException("Column '" + columnName + "' specified in INSERT statement "
+                            + "not found in Trino table '" + targetTable.getName() + "'");
+                }
+
+                columnHandles.add(handle);
+                columnMetadataList.add(metadata);
+            }
+        } else {
+            columnHandles = new ArrayList<>(allColumnHandlesMap.values());
+            columnMetadataList = new ArrayList<>(allColumnMetadataMap.values());
         }
 
         tTrinoConnectorTableSink.setTrinoConnectorColumnHandles(
