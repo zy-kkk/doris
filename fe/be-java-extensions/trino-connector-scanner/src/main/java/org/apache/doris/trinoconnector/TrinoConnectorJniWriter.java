@@ -51,6 +51,7 @@ import io.trino.plugin.base.TypeDeserializer;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Connector;
@@ -143,74 +144,31 @@ public class TrinoConnectorJniWriter extends JniWriter {
 
     @Override
     public void open() throws IOException {
-        try {
-            initConnector();
-            this.pageSinkProvider = getConnectorPageSinkProvider();
-
-            if (pageSinkProvider == null) {
-                throw new IOException("Failed to get ConnectorPageSinkProvider from connector");
-            }
-
-            this.objectMapperProvider = generateObjectMapperProvider();
-
-            try {
-                initTrinoTableMetadata();
-            } catch (Exception e) {
-                printException(e);
-            }
-
-            try {
-                connectorTransactionHandle = connector.beginTransaction(
-                        io.trino.spi.transaction.IsolationLevel.READ_UNCOMMITTED,
-                        true,
-                        true);
-                LOG.info("Created new transaction handle: {}", connectorTransactionHandle);
-
-                ConnectorSession connectorSession = session.toConnectorSession(catalogHandle);
-                metadata = connector.getMetadata(connectorSession, connectorTransactionHandle);
-                if (metadata == null) {
-                    throw new IOException("Failed to get connector metadata");
-                }
-
-                insertTableHandle = metadata.beginInsert(
-                        connectorSession,
-                        connectorTableHandle,
-                        columns,
-                        io.trino.spi.connector.RetryMode.NO_RETRIES);
-
-                if (insertTableHandle == null) {
-                    throw new IOException("Failed to begin insert operation, received null InsertTableHandle");
-                }
-
-                LOG.info("Successfully created InsertTableHandle: {}", insertTableHandle.getClass().getName());
-            } catch (Exception e) {
-                LOG.error("Failed to create InsertTableHandle", e);
-                printException(e);
-                throw new IOException("Failed to create InsertTableHandle: " + e.getMessage(), e);
-            }
-
-            try {
-                sink = pageSinkProvider.createPageSink(
-                        connectorTransactionHandle,
-                        session.toConnectorSession(catalogHandle),
-                        insertTableHandle,
-                        new ConnectorPageSinkId() {
-                            @Override
-                            public long getId() {
-                                return 0;
-                            }
-                        });
-            } catch (Exception e) {
-                printException(e);
-                throw e;
-            }
-
-            LOG.info("Successfully created ConnectorPageSink for catalog: {}", catalogNameString);
-        } catch (Exception e) {
-            LOG.error("Failed to create ConnectorPageSink", e);
-            printException(e);
-            throw new IOException("Failed to create ConnectorPageSink: " + e.getMessage(), e);
-        }
+        initConnector();
+        this.pageSinkProvider = getConnectorPageSinkProvider();
+        this.objectMapperProvider = generateObjectMapperProvider();
+        initTrinoTableMetadata();
+        parseRequiredTypes();
+        connectorTransactionHandle = connector.beginTransaction(
+                io.trino.spi.transaction.IsolationLevel.READ_UNCOMMITTED,
+                true,
+                true);
+        metadata = connector.getMetadata(session.toConnectorSession(catalogHandle), connectorTransactionHandle);
+        insertTableHandle = metadata.beginInsert(
+                session.toConnectorSession(catalogHandle),
+                connectorTableHandle,
+                columns,
+                io.trino.spi.connector.RetryMode.NO_RETRIES);
+        sink = pageSinkProvider.createPageSink(
+                connectorTransactionHandle,
+                session.toConnectorSession(catalogHandle),
+                insertTableHandle,
+                new ConnectorPageSinkId() {
+                    @Override
+                    public long getId() {
+                        return 0;
+                    }
+                });
     }
 
     private ConnectorPageSinkProvider getConnectorPageSinkProvider() {
@@ -226,10 +184,6 @@ public class TrinoConnectorJniWriter extends JniWriter {
     }
 
     private void parseRequiredTypes() {
-        if (fields == null || fields.length == 0) {
-            fields = trinoConnectorAllFieldNames.toArray(new String[0]);
-        }
-
         trinoTypeList = Lists.newArrayList();
         for (int i = 0; i < fields.length; i++) {
             int index = trinoConnectorAllFieldNames.indexOf(fields[i]);
@@ -246,66 +200,17 @@ public class TrinoConnectorJniWriter extends JniWriter {
         if (sink == null) {
             throw new RuntimeException("ConnectorPageSink is not initialized");
         }
-
-        if (!params.containsKey("meta_address")) {
-            throw new RuntimeException("Missing meta_address in params");
-        }
-
-        if (!params.containsKey("required_fields") || !params.containsKey("columns_types")) {
-            StringBuilder requiredFields = new StringBuilder();
-            StringBuilder columnsTypes = new StringBuilder();
-
-            for (int i = 0; i < fields.length; i++) {
-                if (i > 0) {
-                    requiredFields.append(",");
-                    columnsTypes.append("#");
-                }
-                requiredFields.append(fields[i]);
-
-                Type trinoType = trinoTypeList.get(i);
-                String typeName = trinoType.getDisplayName();
-                String dorisType = mapTrinoTypeToDorisType(typeName);
-                columnsTypes.append(dorisType);
-            }
-
-            params.put("required_fields", requiredFields.toString());
-            params.put("columns_types", columnsTypes.toString());
-        }
-
         vectorTable = VectorTable.createReadableTable(params);
-        int numRows = vectorTable.getNumRows();
-        if (numRows == 0) {
-            LOG.info("No data to write");
-            return;
-        }
-
-        LOG.info("Writing {} rows to Trino connector", numRows);
-
-        try {
-            if (fields == null || fields.length == 0) {
-                fields = trinoConnectorAllFieldNames.toArray(new String[0]);
-                parseRequiredTypes();
+        PageBuilder pageBuilder = new PageBuilder(trinoTypeList);
+        for (int rowIdx = 0; rowIdx < vectorTable.getNumRows(); rowIdx++) {
+            pageBuilder.declarePosition();
+            for (int colIdx = 0; colIdx < fields.length; colIdx++) {
+                Object value = getValueFromVectorTable(vectorTable, colIdx, rowIdx);
+                appendValueToPageBuilder(pageBuilder, colIdx, value);
             }
-
-            PageBuilder pageBuilder = new PageBuilder(trinoTypeList);
-
-            for (int rowIdx = 0; rowIdx < numRows; rowIdx++) {
-                pageBuilder.declarePosition();
-
-                for (int colIdx = 0; colIdx < fields.length; colIdx++) {
-                    Object value = getValueFromVectorTable(vectorTable, colIdx, rowIdx);
-
-                    appendValueToPageBuilder(pageBuilder, colIdx, value);
-                }
-            }
-
-            Page page = pageBuilder.build();
-            sink.appendPage(page);
-
-            LOG.info("Successfully wrote {} rows to Trino connector", numRows);
-        } catch (Exception e) {
-            LOG.warn("Failed to write data to Trino connector", e);
         }
+        Page page = pageBuilder.build();
+        sink.appendPage(page);
     }
 
     @Override
@@ -347,8 +252,6 @@ public class TrinoConnectorJniWriter extends JniWriter {
             }
         } catch (Exception e) {
             LOG.warn("Failed to finish writing to Trino connector", e);
-            printException(e);
-
             if (sink != null) {
                 try {
                     sink.abort();
@@ -363,22 +266,22 @@ public class TrinoConnectorJniWriter extends JniWriter {
 
     @Override
     public void close() throws IOException {
-        // if (sink != null) {
-        //     try {
-        //         sink.abort();
-        //     } catch (Exception e) {
-        //         LOG.warn("Failed to abort ConnectorPageSink", e);
-        //     }
-        // }
-        // if (connector != null && connectorTransactionHandle != null) {
-        //     try {
-        //         LOG.info("Attempting to rollback transaction to clean up temporary tables");
-        //         connector.rollback(connectorTransactionHandle);
-        //         LOG.info("Successfully rolled back transaction and cleaned up resources");
-        //     } catch (Exception e) {
-        //         LOG.warn("Failed to rollback transaction", e);
-        //     }
-        // }
+        if (sink != null) {
+            try {
+                sink.abort();
+            } catch (Exception e) {
+                LOG.warn("Failed to abort ConnectorPageSink", e);
+            }
+        }
+        if (connector != null && connectorTransactionHandle != null) {
+            try {
+                LOG.info("Attempting to rollback transaction to clean up temporary tables");
+                connector.rollback(connectorTransactionHandle);
+                LOG.info("Successfully rolled back transaction and cleaned up resources");
+            } catch (Exception e) {
+                LOG.warn("Failed to rollback transaction", e);
+            }
+        }
     }
 
     private Object getValueFromVectorTable(VectorTable table, int colIdx, int rowIdx) {
@@ -428,40 +331,40 @@ public class TrinoConnectorJniWriter extends JniWriter {
             pageBuilder.getBlockBuilder(colIdx).appendNull();
             return;
         }
-
         Type trinoType = trinoTypeList.get(colIdx);
         String typeName = trinoType.getDisplayName();
+        BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(colIdx);
 
         if (typeName.equals("boolean")) {
-            trinoType.writeBoolean(pageBuilder.getBlockBuilder(colIdx), (Boolean) value);
+            trinoType.writeBoolean(blockBuilder, (Boolean) value);
         } else if (typeName.equals("tinyint")) {
-            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+            trinoType.writeLong(blockBuilder, ((Number) value).longValue());
         } else if (typeName.equals("smallint")) {
-            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+            trinoType.writeLong(blockBuilder, ((Number) value).longValue());
         } else if (typeName.equals("integer")) {
-            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+            trinoType.writeLong(blockBuilder, ((Number) value).longValue());
         } else if (typeName.equals("bigint")) {
-            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+            trinoType.writeLong(blockBuilder, ((Number) value).longValue());
         } else if (typeName.startsWith("decimal")) {
-            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+            trinoType.writeObject(blockBuilder, value);
         } else if (typeName.equals("real")) {
-            trinoType.writeLong(pageBuilder.getBlockBuilder(colIdx), ((Number) value).longValue());
+            trinoType.writeLong(blockBuilder, ((Number) value).longValue());
         } else if (typeName.equals("double")) {
-            trinoType.writeDouble(pageBuilder.getBlockBuilder(colIdx), ((Number) value).doubleValue());
+            trinoType.writeDouble(blockBuilder, ((Number) value).doubleValue());
         } else if (typeName.equals("date")) {
-            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+            trinoType.writeObject(blockBuilder, value);
         } else if (typeName.startsWith("timestamp")) {
-            trinoType.writeObject(pageBuilder.getBlockBuilder(colIdx), value);
+            trinoType.writeObject(blockBuilder, value);
         } else if (typeName.startsWith("varchar") || typeName.startsWith("char")) {
             io.airlift.slice.Slice slice = io.airlift.slice.Slices.utf8Slice(value.toString());
-            trinoType.writeSlice(pageBuilder.getBlockBuilder(colIdx), slice);
+            trinoType.writeSlice(blockBuilder, slice);
         } else if (typeName.startsWith("varbinary")) {
             if (value instanceof byte[]) {
                 io.airlift.slice.Slice slice = io.airlift.slice.Slices.wrappedBuffer((byte[]) value);
-                trinoType.writeSlice(pageBuilder.getBlockBuilder(colIdx), slice);
+                trinoType.writeSlice(blockBuilder, slice);
             } else if (value instanceof String) {
                 io.airlift.slice.Slice slice = io.airlift.slice.Slices.utf8Slice((String) value);
-                trinoType.writeSlice(pageBuilder.getBlockBuilder(colIdx), slice);
+                trinoType.writeSlice(blockBuilder, slice);
             } else {
                 throw new RuntimeException("Unsupported value type for VARBINARY: " + value.getClass().getName());
             }
@@ -518,75 +421,6 @@ public class TrinoConnectorJniWriter extends JniWriter {
         } catch (Exception e) {
             LOG.error("Failed to initialize Trino table metadata", e);
             throw new RuntimeException("Failed to initialize Trino table metadata", e);
-        }
-    }
-
-    private Session createSession(TrinoConnectorServicesProvider trinoConnectorServicesProvider) {
-        Set<SystemSessionPropertiesProvider> systemSessionProperties =
-                ImmutableSet.<SystemSessionPropertiesProvider>builder()
-                        .add(new SystemSessionProperties(
-                                new QueryManagerConfig(),
-                                new TaskManagerConfig().setTaskConcurrency(4),
-                                new MemoryManagerConfig(),
-                                TrinoConnectorPluginLoader.getFeaturesConfig(),
-                                new OptimizerConfig(),
-                                new NodeMemoryConfig(),
-                                new DynamicFilterConfig(),
-                                new NodeSchedulerConfig()))
-                        .build();
-        SessionPropertyManager sessionPropertyManager = CatalogServiceProviderModule.createSessionPropertyManager(
-                systemSessionProperties, trinoConnectorServicesProvider);
-
-        return Session.builder(sessionPropertyManager)
-                .setQueryId(queryIdGenerator.createNextQueryId())
-                .setIdentity(Identity.ofUser("user"))
-                .setOriginalIdentity(Identity.ofUser("user"))
-                .setSource("test")
-                .setCatalog("catalog")
-                .setSchema("schema")
-                .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(ZoneId.systemDefault().toString()))
-                .setLocale(Locale.ENGLISH)
-                .setClientCapabilities(Arrays.stream(ClientCapabilities.values()).map(Enum::name)
-                        .collect(ImmutableSet.toImmutableSet()))
-                .setRemoteUserAddress("address")
-                .setUserAgent("agent")
-                .build();
-    }
-
-    private void printException(Exception e) {
-        StringWriter stringWriter = new StringWriter();
-        PrintWriter printWriter = new PrintWriter(stringWriter);
-        e.printStackTrace(printWriter);
-        LOG.error("Exception: " + stringWriter);
-    }
-
-    private String mapTrinoTypeToDorisType(String trinoType) {
-        if (trinoType.equals("boolean")) {
-            return "BOOLEAN";
-        } else if (trinoType.equals("tinyint")) {
-            return "TINYINT";
-        } else if (trinoType.equals("smallint")) {
-            return "SMALLINT";
-        } else if (trinoType.equals("integer")) {
-            return "INT";
-        } else if (trinoType.equals("bigint")) {
-            return "BIGINT";
-        } else if (trinoType.startsWith("decimal")) {
-            return "DECIMALV2";
-        } else if (trinoType.equals("real")) {
-            return "FLOAT";
-        } else if (trinoType.equals("double")) {
-            return "DOUBLE";
-        } else if (trinoType.equals("date")) {
-            return "DATEV2";
-        } else if (trinoType.startsWith("timestamp")) {
-            return "DATETIMEV2";
-        } else if (trinoType.startsWith("varchar") || trinoType.startsWith("char")) {
-            return "VARCHAR";
-        } else if (trinoType.startsWith("varbinary")) {
-            return "BINARY";
-        } else {
-            return "VARCHAR";
         }
     }
 }
