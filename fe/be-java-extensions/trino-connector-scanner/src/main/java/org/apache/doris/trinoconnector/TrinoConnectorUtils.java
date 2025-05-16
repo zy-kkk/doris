@@ -34,7 +34,6 @@ import io.trino.metadata.SessionPropertyManager;
 import io.trino.spi.security.Identity;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.sql.planner.OptimizerConfig;
-import static org.apache.doris.trinoconnector.TrinoConnectorJniWriter.queryIdGenerator;
 
 import java.time.ZoneId;
 import java.util.Arrays;
@@ -42,7 +41,9 @@ import java.util.Locale;
 import java.util.Set;
 
 public class TrinoConnectorUtils {
-    private Session createSession(TrinoConnectorServicesProvider trinoConnectorServicesProvider) {
+    private static final QueryIdGenerator queryIdGenerator = new QueryIdGenerator();
+
+    static Session createSession(TrinoConnectorServicesProvider trinoConnectorServicesProvider) {
         Set<SystemSessionPropertiesProvider> systemSessionProperties =
                 ImmutableSet.<SystemSessionPropertiesProvider>builder()
                         .add(new SystemSessionProperties(
