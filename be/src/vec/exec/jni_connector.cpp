@@ -16,6 +16,8 @@
 // under the License.
 
 #include "jni_connector.h"
+#include "jni_scan_connector.h"
+#include "jni_write_connector.h"
 
 #include <glog/logging.h>
 
@@ -64,445 +66,152 @@ namespace doris::vectorized {
     M(PrimitiveType::TYPE_IPV4, ColumnVector<IPv4>, IPv4)                   \
     M(PrimitiveType::TYPE_IPV6, ColumnVector<IPv6>, IPv6)
 
-Status JniConnector::open(RuntimeState* state, RuntimeProfile* profile) {
-    _state = state;
-    _profile = profile;
-    ADD_TIMER(_profile, _connector_name.c_str());
-    _open_scanner_time = ADD_CHILD_TIMER(_profile, "OpenScannerTime", _connector_name.c_str());
-    _java_scan_time = ADD_CHILD_TIMER(_profile, "JavaScanTime", _connector_name.c_str());
-    _java_append_data_time =
-            ADD_CHILD_TIMER(_profile, "JavaAppendDataTime", _connector_name.c_str());
-    _java_create_vector_table_time =
-            ADD_CHILD_TIMER(_profile, "JavaCreateVectorTableTime", _connector_name.c_str());
-    _fill_block_time = ADD_CHILD_TIMER(_profile, "FillBlockTime", _connector_name.c_str());
-    _max_time_split_weight_counter = _profile->add_conditition_counter(
-            "MaxTimeSplitWeight", TUnit::UNIT, [](int64_t _c, int64_t c) { return c > _c; },
-            _connector_name.c_str());
-    _java_scan_watcher = 0;
-    // cannot put the env into fields, because frames in an env object is limited
-    // to avoid limited frames in a thread, we should get local env in a method instead of in whole object.
-    JNIEnv* env = nullptr;
-    int batch_size = 0;
-    if (!_is_table_schema) {
-        batch_size = _state->batch_size();
+// =================== IJniConnector Base Implementation ===================
+
+void IJniConnector::_collect_profile_before_close() {
+    if (_jni_object_initialized && _profile != nullptr) {
+        JNIEnv* env = nullptr;
+        Status st = JniUtil::GetJNIEnv(&env);
+        if (!st) {
+            LOG(WARNING) << "failed to get jni env when collect profile: " << st;
+            return;
+        }
+        for (const auto& metric : get_statistics(env)) {
+            std::vector<std::string> type_and_name = split(metric.first, ":");
+            if (type_and_name.size() != 2) {
+                LOG(WARNING) << "Name of JNI metric should be pattern like 'metricType:metricName'";
+                continue;
+            }
+            long metric_value = std::stol(metric.second);
+            RuntimeProfile::Counter* counter;
+            if (type_and_name[0] == "timer") {
+                counter = ADD_CHILD_TIMER(_profile, type_and_name[1], _connector_name);
+            } else if (type_and_name[0] == "counter") {
+                counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::UNIT, _connector_name);
+            } else if (type_and_name[0] == "bytes") {
+                counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::BYTES, _connector_name);
+            } else {
+                LOG(WARNING) << "Type of JNI metric should be timer, counter or bytes";
+                continue;
+            }
+            COUNTER_UPDATE(counter, metric_value);
+        }
     }
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-    SCOPED_RAW_TIMER(&_jni_scanner_open_watcher);
-    _scanner_params.emplace("time_zone", _state->timezone());
-    RETURN_IF_ERROR(_init_jni_scanner(env, batch_size));
-    // Call org.apache.doris.common.jni.JniScanner#open
-    env->CallVoidMethod(_jni_object, _jni_open);
-    RETURN_ERROR_IF_EXC(env);
-    _jni_object_initialized = true;
-    // Mark as scanner mode
-    _is_writer = false;
-    return Status::OK();
 }
 
-Status JniConnector::init(
-        const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range) {
-    // TODO: This logic need to be changed.
-    // See the comment of "predicates" field in JniScanner.java
+// =================== JniConnector Wrapper Implementation ===================
 
-    // _generate_predicates(colname_to_value_range);
-    // if (_predicates_length != 0 && _predicates != nullptr) {
-    //     int64_t predicates_address = (int64_t)_predicates.get();
-    //     // We can call org.apache.doris.common.jni.vec.ScanPredicate#parseScanPredicates to parse the
-    //     // serialized predicates in java side.
-    //     _scanner_params.emplace("push_down_predicates", std::to_string(predicates_address));
-    // }
-    return Status::OK();
+JniConnector::JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params,
+                           std::vector<std::string> column_names, int64_t self_split_weight) {
+    _impl = std::make_unique<JniScanner>(std::move(connector_class), std::move(scanner_params),
+                                         std::move(column_names), self_split_weight);
+    _is_writer = false;
+}
+
+JniConnector::JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params) {
+    _impl = std::make_unique<JniScanner>(std::move(connector_class), std::move(scanner_params));
+    _is_writer = false;
+}
+
+Status JniConnector::open(RuntimeState* state, RuntimeProfile* profile) {
+    if (!_is_writer) {
+        return static_cast<JniScanner*>(_impl.get())->open(state, profile);
+    }
+    return Status::InternalError("Cannot call open on writer mode");
+}
+
+Status JniConnector::init(const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range) {
+    if (!_is_writer) {
+        return static_cast<JniScanner*>(_impl.get())->init(colname_to_value_range);
+    }
+    return Status::InternalError("Cannot call init on writer mode");
 }
 
 Status JniConnector::get_next_block(Block* block, size_t* read_rows, bool* eof) {
-    // Call org.apache.doris.common.jni.JniScanner#getNextBatchMeta
-    // return the address of meta information
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-    long meta_address = 0;
-    {
-        SCOPED_RAW_TIMER(&_java_scan_watcher);
-        SCOPED_TIMER(_java_scan_time);
-        meta_address = env->CallLongMethod(_jni_object, _jni_scanner_get_next_batch);
+    if (!_is_writer) {
+        return static_cast<JniScanner*>(_impl.get())->get_next_block(block, read_rows, eof);
     }
-    RETURN_ERROR_IF_EXC(env);
-    if (meta_address == 0) {
-        // Address == 0 when there's no data in scanner
-        *read_rows = 0;
-        *eof = true;
-        return Status::OK();
-    }
-    _set_meta(meta_address);
-    long num_rows = _table_meta.next_meta_as_long();
-    if (num_rows == 0) {
-        *read_rows = 0;
-        *eof = true;
-        return Status::OK();
-    }
-    RETURN_IF_ERROR(_fill_block(block, num_rows));
-    *read_rows = num_rows;
-    *eof = false;
-    env->CallVoidMethod(_jni_object, _jni_release_table);
-    RETURN_ERROR_IF_EXC(env);
-    _has_read += num_rows;
-    return Status::OK();
+    return Status::InternalError("Cannot call get_next_block on writer mode");
 }
 
 Status JniConnector::get_table_schema(std::string& table_schema_str) {
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-    // Call org.apache.doris.jni.JniScanner#getTableSchema
-    // return the TableSchema information
-    jstring jstr = (jstring)env->CallObjectMethod(_jni_object, _jni_scanner_get_table_schema);
-    RETURN_ERROR_IF_EXC(env);
-    table_schema_str = env->GetStringUTFChars(jstr, nullptr);
-    RETURN_ERROR_IF_EXC(env);
-    return Status::OK();
+    if (!_is_writer) {
+        return static_cast<JniScanner*>(_impl.get())->get_table_schema(table_schema_str);
+    }
+    return Status::InternalError("Cannot call get_table_schema on writer mode");
+}
+
+Status JniConnector::open_writer(RuntimeState* state, RuntimeProfile* profile) {
+    if (_impl == nullptr) {
+        _impl = std::make_unique<JniWriter>("", std::map<std::string, std::string>());
+        _is_writer = true;
+    }
+    if (_is_writer) {
+        return static_cast<JniWriter*>(_impl.get())->open_writer(state, profile);
+    }
+    return Status::InternalError("Cannot call open_writer on scanner mode");
+}
+
+Status JniConnector::write(Block* block) {
+    if (_is_writer) {
+        return static_cast<JniWriter*>(_impl.get())->write(block);
+    }
+    return Status::InternalError("Cannot call write on scanner mode");
+}
+
+Status JniConnector::finish() {
+    if (_is_writer) {
+        return static_cast<JniWriter*>(_impl.get())->finish();
+    }
+    return Status::InternalError("Cannot call finish on scanner mode");
 }
 
 std::map<std::string, std::string> JniConnector::get_statistics(JNIEnv* env) {
-    LOG(WARNING) << "Entering get_statistics for " << _connector_name;
-
-    if (_jni_get_statistics == nullptr) {
-        LOG(WARNING) << "get_statistics method ID is null";
-        return std::map<std::string, std::string> {};
-    }
-
-    if (_jni_object == nullptr) {
-        LOG(WARNING) << "JNI object is null";
-        return std::map<std::string, std::string> {};
-    }
-
-    try {
-        LOG(WARNING) << "Calling CallObjectMethod for getStatistics";
-        jobject metrics = env->CallObjectMethod(_jni_object, _jni_get_statistics);
-
-        if (env->ExceptionCheck()) {
-            LOG(WARNING) << "Exception occurred in get_statistics: "
-                         << JniUtil::GetJniExceptionMsg(env).to_string();
-            env->ExceptionClear();
-            if (metrics != nullptr) {
-                env->DeleteLocalRef(metrics);
-            }
-            return std::map<std::string, std::string> {};
-        }
-
-        if (metrics == nullptr) {
-            LOG(WARNING) << "getStatistics returned null";
-            return std::map<std::string, std::string> {};
-        }
-
-        LOG(WARNING) << "Converting Java map to C++ map";
-        std::map<std::string, std::string> result = JniUtil::convert_to_cpp_map(env, metrics);
-        LOG(WARNING) << "Converted map size: " << result.size();
-
-        env->DeleteLocalRef(metrics);
-        return result;
-    } catch (const std::exception& e) {
-        LOG(WARNING) << "Exception in get_statistics: " << e.what();
-        return std::map<std::string, std::string> {};
-    } catch (...) {
-        LOG(WARNING) << "Unknown exception in get_statistics";
-        return std::map<std::string, std::string> {};
-    }
+    return _impl->get_statistics(env);
 }
 
 Status JniConnector::close() {
-    if (!_closed) {
-        JNIEnv* env = nullptr;
-        RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-        if (_jni_object_initialized && _jni_object != nullptr) {
-            if (!_is_writer) {
-                // Scanner metrics
-                COUNTER_UPDATE(_open_scanner_time, _jni_scanner_open_watcher);
-                COUNTER_UPDATE(_fill_block_time, _fill_block_watcher);
-
-                int64_t _append = (int64_t)env->CallLongMethod(_jni_object,
-                                                               _jni_scanner_get_append_data_time);
-                COUNTER_UPDATE(_java_append_data_time, _append);
-
-                int64_t _create = (int64_t)env->CallLongMethod(
-                        _jni_object, _jni_scanner_get_create_vector_table_time);
-                COUNTER_UPDATE(_java_create_vector_table_time, _create);
-
-                COUNTER_UPDATE(_java_scan_time, _java_scan_watcher - _append - _create);
-
-                _max_time_split_weight_counter->conditional_update(
-                        _jni_scanner_open_watcher + _fill_block_watcher + _java_scan_watcher,
-                        _self_split_weight);
-            }
-            // For writer mode, skip scanner metrics (empty)
-
-            // Common cleanup for both modes
-            if (!_is_writer) {
-                // Only scanners have a releaseTable method
-                env->CallVoidMethod(_jni_object, _jni_release_table);
-            }
-            // Always close the JNI object
-            env->CallVoidMethod(_jni_object, _jni_close);
-            env->DeleteGlobalRef(_jni_object);
-        }
-        if (_jni_class != nullptr) {
-            // _jni_scanner_cls may be null if init connector failed
-            env->DeleteGlobalRef(_jni_class);
-        }
-        _closed = true;
-        jthrowable exc = (env)->ExceptionOccurred();
-        if (exc != nullptr) {
-            // Ensure successful resource release
-            throw Exception(Status::FatalError("Failed to release jni resource: {}",
-                                               JniUtil::GetJniExceptionMsg(env).to_string()));
-        }
-    }
-    return Status::OK();
-}
-
-Status JniConnector::_init_jni_scanner(JNIEnv* env, int batch_size) {
-    RETURN_IF_ERROR(JniUtil::get_jni_scanner_class(env, _connector_class.c_str(), &_jni_class));
-    if (_jni_class == nullptr) {
-        if (env->ExceptionOccurred()) {
-            env->ExceptionDescribe();
-        }
-        return Status::InternalError("Fail to get JniScanner class.");
-    }
-    RETURN_ERROR_IF_EXC(env);
-
-    jmethodID scanner_constructor = env->GetMethodID(_jni_class, "<init>", "(ILjava/util/Map;)V");
-    RETURN_ERROR_IF_EXC(env);
-
-    // prepare constructor parameters
-    jobject hashmap_object = JniUtil::convert_to_java_map(env, _scanner_params);
-    jobject jni_scanner_obj =
-            env->NewObject(_jni_class, scanner_constructor, batch_size, hashmap_object);
-
-    RETURN_ERROR_IF_EXC(env);
-
-    // prepare constructor parameters
-    env->DeleteLocalRef(hashmap_object);
-    RETURN_ERROR_IF_EXC(env);
-
-    _jni_open = env->GetMethodID(_jni_class, "open", "()V");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_scanner_get_next_batch = env->GetMethodID(_jni_class, "getNextBatchMeta", "()J");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_scanner_get_append_data_time = env->GetMethodID(_jni_class, "getAppendDataTime", "()J");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_scanner_get_create_vector_table_time =
-            env->GetMethodID(_jni_class, "getCreateVectorTableTime", "()J");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_scanner_get_table_schema =
-            env->GetMethodID(_jni_class, "getTableSchema", "()Ljava/lang/String;");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_close = env->GetMethodID(_jni_class, "close", "()V");
-    _jni_release_column = env->GetMethodID(_jni_class, "releaseColumn", "(I)V");
-    _jni_release_table = env->GetMethodID(_jni_class, "releaseTable", "()V");
-    _jni_get_statistics = env->GetMethodID(_jni_class, "getStatistics", "()Ljava/util/Map;");
-    RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, jni_scanner_obj, &_jni_object));
-    env->DeleteLocalRef(jni_scanner_obj);
-    RETURN_ERROR_IF_EXC(env);
-    return Status::OK();
-}
-
-Status JniConnector::fill_block(Block* block, const ColumnNumbers& arguments, long table_address) {
-    if (table_address == 0) {
-        return Status::InternalError("table_address is 0");
-    }
-    TableMetaAddress table_meta(table_address);
-    long num_rows = table_meta.next_meta_as_long();
-    for (size_t i : arguments) {
-        if (block->get_by_position(i).column.get() == nullptr) {
-            auto return_type = block->get_data_type(i);
-            bool result_nullable = return_type->is_nullable();
-            ColumnUInt8::MutablePtr null_col = nullptr;
-            if (result_nullable) {
-                return_type = remove_nullable(return_type);
-                null_col = ColumnUInt8::create();
-            }
-            auto res_col = return_type->create_column();
-            if (result_nullable) {
-                block->replace_by_position(
-                        i, ColumnNullable::create(std::move(res_col), std::move(null_col)));
-            } else {
-                block->replace_by_position(i, std::move(res_col));
-            }
-        } else if (is_column_const(*(block->get_by_position(i).column))) {
-            auto doris_column = block->get_by_position(i).column->convert_to_full_column_if_const();
-            bool is_nullable = block->get_by_position(i).type->is_nullable();
-            block->replace_by_position(i, is_nullable ? make_nullable(doris_column) : doris_column);
-        }
-        auto& column_with_type_and_name = block->get_by_position(i);
-        auto& column_ptr = column_with_type_and_name.column;
-        auto& column_type = column_with_type_and_name.type;
-        RETURN_IF_ERROR(_fill_column(table_meta, column_ptr, column_type, num_rows));
-    }
-    return Status::OK();
-}
-
-Status JniConnector::_fill_block(Block* block, size_t num_rows) {
-    SCOPED_RAW_TIMER(&_fill_block_watcher);
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-    for (int i = 0; i < _column_names.size(); ++i) {
-        auto& column_with_type_and_name = block->get_by_name(_column_names[i]);
-        auto& column_ptr = column_with_type_and_name.column;
-        auto& column_type = column_with_type_and_name.type;
-        RETURN_IF_ERROR(_fill_column(_table_meta, column_ptr, column_type, num_rows));
-        // Column is not released when _fill_column failed. It will be released when releasing table.
-        env->CallVoidMethod(_jni_object, _jni_release_column, i);
-        RETURN_ERROR_IF_EXC(env);
-    }
-    return Status::OK();
-}
-
-Status JniConnector::_fill_column(TableMetaAddress& address, ColumnPtr& doris_column,
-                                  DataTypePtr& data_type, size_t num_rows) {
-    auto logical_type = data_type->get_primitive_type();
-    void* null_map_ptr = address.next_meta_as_ptr();
-    if (null_map_ptr == nullptr) {
-        // org.apache.doris.common.jni.vec.ColumnType.Type#UNSUPPORTED will set column address as 0
-        return Status::InternalError("Unsupported type {} in java side", data_type->get_name());
-    }
-    MutableColumnPtr data_column;
-    if (doris_column->is_nullable()) {
-        auto* nullable_column =
-                reinterpret_cast<vectorized::ColumnNullable*>(doris_column->assume_mutable().get());
-        data_column = nullable_column->get_nested_column_ptr();
-        NullMap& null_map = nullable_column->get_null_map_data();
-        size_t origin_size = null_map.size();
-        null_map.resize(origin_size + num_rows);
-        memcpy(null_map.data() + origin_size, static_cast<bool*>(null_map_ptr), num_rows);
-    } else {
-        data_column = doris_column->assume_mutable();
-    }
-    // Date and DateTime are deprecated and not supported.
-    switch (logical_type) {
-#define DISPATCH(TYPE_INDEX, COLUMN_TYPE, CPP_TYPE)              \
-    case TYPE_INDEX:                                             \
-        return _fill_fixed_length_column<COLUMN_TYPE, CPP_TYPE>( \
-                data_column, reinterpret_cast<CPP_TYPE*>(address.next_meta_as_ptr()), num_rows);
-        FOR_FIXED_LENGTH_TYPES(DISPATCH)
-#undef DISPATCH
-    case PrimitiveType::TYPE_STRING:
-        [[fallthrough]];
-    case PrimitiveType::TYPE_CHAR:
-        [[fallthrough]];
-    case PrimitiveType::TYPE_VARCHAR:
-        return _fill_string_column(address, data_column, num_rows);
-    case PrimitiveType::TYPE_ARRAY:
-        return _fill_array_column(address, data_column, data_type, num_rows);
-    case PrimitiveType::TYPE_MAP:
-        return _fill_map_column(address, data_column, data_type, num_rows);
-    case PrimitiveType::TYPE_STRUCT:
-        return _fill_struct_column(address, data_column, data_type, num_rows);
-    default:
-        return Status::InvalidArgument("Unsupported type {} in jni scanner", data_type->get_name());
-    }
-    return Status::OK();
-}
-
-Status JniConnector::_fill_string_column(TableMetaAddress& address, MutableColumnPtr& doris_column,
-                                         size_t num_rows) {
-    auto& string_col = static_cast<const ColumnString&>(*doris_column);
-    ColumnString::Chars& string_chars = const_cast<ColumnString::Chars&>(string_col.get_chars());
-    ColumnString::Offsets& string_offsets =
-            const_cast<ColumnString::Offsets&>(string_col.get_offsets());
-    int* offsets = reinterpret_cast<int*>(address.next_meta_as_ptr());
-    char* chars = reinterpret_cast<char*>(address.next_meta_as_ptr());
-
-    // This judgment is necessary, otherwise the following statement `offsets[num_rows - 1]` out of bounds
-    // What's more, This judgment must be placed after `address.next_meta_as_ptr()`
-    // because `address.next_meta_as_ptr` will make `address._meta_index` plus 1
-    if (num_rows == 0) {
-        return Status::OK();
-    }
-
-    size_t origin_chars_size = string_chars.size();
-    string_chars.resize(origin_chars_size + offsets[num_rows - 1]);
-    memcpy(string_chars.data() + origin_chars_size, chars, offsets[num_rows - 1]);
-
-    size_t origin_offsets_size = string_offsets.size();
-    size_t start_offset = string_offsets[origin_offsets_size - 1];
-    string_offsets.resize(origin_offsets_size + num_rows);
-    for (size_t i = 0; i < num_rows; ++i) {
-        string_offsets[origin_offsets_size + i] = offsets[i] + start_offset;
-    }
-    return Status::OK();
-}
-
-Status JniConnector::_fill_array_column(TableMetaAddress& address, MutableColumnPtr& doris_column,
-                                        DataTypePtr& data_type, size_t num_rows) {
-    ColumnPtr& element_column = static_cast<ColumnArray&>(*doris_column).get_data_ptr();
-    DataTypePtr& element_type = const_cast<DataTypePtr&>(
-            (assert_cast<const DataTypeArray*>(remove_nullable(data_type).get()))
-                    ->get_nested_type());
-    ColumnArray::Offsets64& offsets_data = static_cast<ColumnArray&>(*doris_column).get_offsets();
-
-    int64* offsets = reinterpret_cast<int64*>(address.next_meta_as_ptr());
-    size_t origin_size = offsets_data.size();
-    offsets_data.resize(origin_size + num_rows);
-    size_t start_offset = offsets_data[origin_size - 1];
-    for (size_t i = 0; i < num_rows; ++i) {
-        offsets_data[origin_size + i] = offsets[i] + start_offset;
-    }
-
-    // offsets[num_rows - 1] == offsets_data[origin_size + num_rows - 1] - start_offset
-    // but num_row equals 0 when there are all empty arrays
-    return _fill_column(address, element_column, element_type,
-                        offsets_data[origin_size + num_rows - 1] - start_offset);
-}
-
-Status JniConnector::_fill_map_column(TableMetaAddress& address, MutableColumnPtr& doris_column,
-                                      DataTypePtr& data_type, size_t num_rows) {
-    auto& map = static_cast<ColumnMap&>(*doris_column);
-    DataTypePtr& key_type = const_cast<DataTypePtr&>(
-            reinterpret_cast<const DataTypeMap*>(remove_nullable(data_type).get())->get_key_type());
-    DataTypePtr& value_type = const_cast<DataTypePtr&>(
-            reinterpret_cast<const DataTypeMap*>(remove_nullable(data_type).get())
-                    ->get_value_type());
-    ColumnPtr& key_column = map.get_keys_ptr();
-    ColumnPtr& value_column = map.get_values_ptr();
-    ColumnArray::Offsets64& map_offsets = map.get_offsets();
-
-    int64* offsets = reinterpret_cast<int64*>(address.next_meta_as_ptr());
-    size_t origin_size = map_offsets.size();
-    map_offsets.resize(origin_size + num_rows);
-    size_t start_offset = map_offsets[origin_size - 1];
-    for (size_t i = 0; i < num_rows; ++i) {
-        map_offsets[origin_size + i] = offsets[i] + start_offset;
-    }
-
-    RETURN_IF_ERROR(_fill_column(address, key_column, key_type,
-                                 map_offsets[origin_size + num_rows - 1] - start_offset));
-    return _fill_column(address, value_column, value_type,
-                        map_offsets[origin_size + num_rows - 1] - start_offset);
-}
-
-Status JniConnector::_fill_struct_column(TableMetaAddress& address, MutableColumnPtr& doris_column,
-                                         DataTypePtr& data_type, size_t num_rows) {
-    auto& doris_struct = static_cast<ColumnStruct&>(*doris_column);
-    const DataTypeStruct* doris_struct_type =
-            reinterpret_cast<const DataTypeStruct*>(remove_nullable(data_type).get());
-    for (int i = 0; i < doris_struct.tuple_size(); ++i) {
-        ColumnPtr& struct_field = doris_struct.get_column_ptr(i);
-        DataTypePtr& field_type = const_cast<DataTypePtr&>(doris_struct_type->get_element(i));
-        RETURN_IF_ERROR(_fill_column(address, struct_field, field_type, num_rows));
-    }
-    return Status::OK();
-}
-
-void JniConnector::_generate_predicates(
-        const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range) {
-    if (colname_to_value_range == nullptr) {
-        return;
-    }
-    for (auto& kv : *colname_to_value_range) {
-        const std::string& column_name = kv.first;
-        const ColumnValueRangeType& col_val_range = kv.second;
-        std::visit([&](auto&& range) { _parse_value_range(range, column_name); }, col_val_range);
-    }
+    return _impl->close();
 }
 
 std::string JniConnector::get_jni_type(const DataTypePtr& data_type) {
+    return IJniConnector::get_jni_type(data_type);
+}
+
+std::string JniConnector::get_jni_type_with_different_string(const DataTypePtr& data_type) {
+    return IJniConnector::get_jni_type_with_different_string(data_type);
+}
+
+Status JniConnector::to_java_table(Block* block, size_t num_rows, const ColumnNumbers& arguments,
+                                   std::unique_ptr<long[]>& meta) {
+    return IJniConnector::to_java_table(block, num_rows, arguments, meta);
+}
+
+Status JniConnector::to_java_table(Block* block, std::unique_ptr<long[]>& meta) {
+    return IJniConnector::to_java_table(block, meta);
+}
+
+std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* block,
+                                                                     const ColumnNumbers& arguments,
+                                                                     bool ignore_column_name) {
+    return IJniConnector::parse_table_schema(block, arguments, ignore_column_name);
+}
+
+std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* block) {
+    return IJniConnector::parse_table_schema(block);
+}
+
+Status JniConnector::fill_block(Block* block, const ColumnNumbers& arguments, long table_address) {
+    return IJniConnector::fill_block(block, arguments, table_address);
+}
+
+} // namespace doris::vectorized
+
+// =================== Static Utility Methods Implementation ===================
+
+namespace doris::vectorized {
+
+std::string IJniConnector::get_jni_type(const DataTypePtr& data_type) {
     DataTypePtr type = remove_nullable(data_type);
     std::ostringstream buffer;
     switch (type->get_primitive_type()) {
@@ -563,7 +272,7 @@ std::string JniConnector::get_jni_type(const DataTypePtr& data_type) {
         return buffer.str();
     }
     case TYPE_STRUCT: {
-        const DataTypeStruct* struct_type = reinterpret_cast<const DataTypeStruct*>(type.get());
+        auto* struct_type = reinterpret_cast<const DataTypeStruct*>(type.get());
         buffer << "struct<";
         for (int i = 0; i < struct_type->get_elements().size(); ++i) {
             if (i != 0) {
@@ -576,12 +285,12 @@ std::string JniConnector::get_jni_type(const DataTypePtr& data_type) {
         return buffer.str();
     }
     case TYPE_ARRAY: {
-        const DataTypeArray* array_type = reinterpret_cast<const DataTypeArray*>(type.get());
+        auto* array_type = reinterpret_cast<const DataTypeArray*>(type.get());
         buffer << "array<" << get_jni_type(array_type->get_nested_type()) << ">";
         return buffer.str();
     }
     case TYPE_MAP: {
-        const DataTypeMap* map_type = reinterpret_cast<const DataTypeMap*>(type.get());
+        auto* map_type = reinterpret_cast<const DataTypeMap*>(type.get());
         buffer << "map<" << get_jni_type(map_type->get_key_type()) << ","
                << get_jni_type(map_type->get_value_type()) << ">";
         return buffer.str();
@@ -591,7 +300,7 @@ std::string JniConnector::get_jni_type(const DataTypePtr& data_type) {
     }
 }
 
-std::string JniConnector::get_jni_type_with_different_string(const DataTypePtr& data_type) {
+std::string IJniConnector::get_jni_type_with_different_string(const DataTypePtr& data_type) {
     DataTypePtr type = remove_nullable(data_type);
     std::ostringstream buffer;
     switch (data_type->get_primitive_type()) {
@@ -693,93 +402,7 @@ std::string JniConnector::get_jni_type_with_different_string(const DataTypePtr& 
     }
 }
 
-Status JniConnector::_fill_column_meta(const ColumnPtr& doris_column, const DataTypePtr& data_type,
-                                       std::vector<long>& meta_data) {
-    auto logical_type = data_type->get_primitive_type();
-    const IColumn* column = nullptr;
-    // insert const flag
-    if (is_column_const(*doris_column)) {
-        meta_data.emplace_back((long)1);
-        const auto& const_column = assert_cast<const ColumnConst&>(*doris_column);
-        column = &(const_column.get_data_column());
-    } else {
-        meta_data.emplace_back((long)0);
-        column = &(*doris_column);
-    }
-
-    // insert null map address
-    const IColumn* data_column = nullptr;
-    if (column->is_nullable()) {
-        const auto& nullable_column = assert_cast<const vectorized::ColumnNullable&>(*column);
-        data_column = &(nullable_column.get_nested_column());
-        const auto& null_map = nullable_column.get_null_map_data();
-        meta_data.emplace_back((long)null_map.data());
-    } else {
-        meta_data.emplace_back(0);
-        data_column = column;
-    }
-    switch (logical_type) {
-#define DISPATCH(TYPE_INDEX, COLUMN_TYPE, CPP_TYPE)                                          \
-    case TYPE_INDEX: {                                                                       \
-        meta_data.emplace_back(_get_fixed_length_column_address<COLUMN_TYPE>(*data_column)); \
-        break;                                                                               \
-    }
-        FOR_FIXED_LENGTH_TYPES(DISPATCH)
-#undef DISPATCH
-    case PrimitiveType::TYPE_STRING:
-        [[fallthrough]];
-    case PrimitiveType::TYPE_CHAR:
-        [[fallthrough]];
-    case PrimitiveType::TYPE_VARCHAR: {
-        const auto& string_column = assert_cast<const ColumnString&>(*data_column);
-        // inert offsets
-        meta_data.emplace_back((long)string_column.get_offsets().data());
-        meta_data.emplace_back((long)string_column.get_chars().data());
-        break;
-    }
-    case PrimitiveType::TYPE_ARRAY: {
-        const auto& element_column = assert_cast<const ColumnArray&>(*data_column).get_data_ptr();
-        meta_data.emplace_back(
-                (long)assert_cast<const ColumnArray&>(*data_column).get_offsets().data());
-        const auto& element_type = assert_cast<const DataTypePtr&>(
-                (assert_cast<const DataTypeArray*>(remove_nullable(data_type).get()))
-                        ->get_nested_type());
-        RETURN_IF_ERROR(_fill_column_meta(element_column, element_type, meta_data));
-        break;
-    }
-    case PrimitiveType::TYPE_STRUCT: {
-        const auto& doris_struct = assert_cast<const ColumnStruct&>(*data_column);
-        const auto* doris_struct_type =
-                assert_cast<const DataTypeStruct*>(remove_nullable(data_type).get());
-        for (int i = 0; i < doris_struct.tuple_size(); ++i) {
-            const auto& struct_field = doris_struct.get_column_ptr(i);
-            const auto& field_type =
-                    assert_cast<const DataTypePtr&>(doris_struct_type->get_element(i));
-            RETURN_IF_ERROR(_fill_column_meta(struct_field, field_type, meta_data));
-        }
-        break;
-    }
-    case PrimitiveType::TYPE_MAP: {
-        const auto& map = assert_cast<const ColumnMap&>(*data_column);
-        const auto& key_type = assert_cast<const DataTypePtr&>(
-                assert_cast<const DataTypeMap*>(remove_nullable(data_type).get())->get_key_type());
-        const auto& value_type = assert_cast<const DataTypePtr&>(
-                assert_cast<const DataTypeMap*>(remove_nullable(data_type).get())
-                        ->get_value_type());
-        const auto& key_column = map.get_keys_ptr();
-        const auto& value_column = map.get_values_ptr();
-        meta_data.emplace_back((long)map.get_offsets().data());
-        RETURN_IF_ERROR(_fill_column_meta(key_column, key_type, meta_data));
-        RETURN_IF_ERROR(_fill_column_meta(value_column, value_type, meta_data));
-        break;
-    }
-    default:
-        return Status::InternalError("Unsupported type: {}", data_type->get_name());
-    }
-    return Status::OK();
-}
-
-Status JniConnector::to_java_table(Block* block, std::unique_ptr<long[]>& meta) {
+Status IJniConnector::to_java_table(Block* block, std::unique_ptr<long[]>& meta) {
     ColumnNumbers arguments;
     for (size_t i = 0; i < block->columns(); ++i) {
         arguments.emplace_back(i);
@@ -787,10 +410,9 @@ Status JniConnector::to_java_table(Block* block, std::unique_ptr<long[]>& meta) 
     return to_java_table(block, block->rows(), arguments, meta);
 }
 
-Status JniConnector::to_java_table(Block* block, size_t num_rows, const ColumnNumbers& arguments,
+Status IJniConnector::to_java_table(Block* block, size_t num_rows, const ColumnNumbers& arguments,
                                    std::unique_ptr<long[]>& meta) {
     std::vector<long> meta_data;
-    // insert number of rows
     meta_data.emplace_back(num_rows);
     for (size_t i : arguments) {
         auto& column_with_type_and_name = block->get_by_position(i);
@@ -799,20 +421,17 @@ Status JniConnector::to_java_table(Block* block, size_t num_rows, const ColumnNu
     }
 
     meta.reset(new long[meta_data.size()]);
-    memcpy(meta.get(), &meta_data[0], meta_data.size() * 8);
+    memcpy(meta.get(), meta_data.data(), meta_data.size() * 8);
     return Status::OK();
 }
 
-std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* block,
+std::pair<std::string, std::string> IJniConnector::parse_table_schema(Block* block,
                                                                      const ColumnNumbers& arguments,
                                                                      bool ignore_column_name) {
-    // prepare table schema
     std::ostringstream required_fields;
     std::ostringstream columns_types;
     for (int i = 0; i < arguments.size(); ++i) {
-        // column name maybe empty or has special characters
-        // std::string field = block->get_by_position(i).name;
-        std::string type = JniConnector::get_jni_type(block->get_by_position(arguments[i]).type);
+        std::string type = IJniConnector::get_jni_type(block->get_by_position(arguments[i]).type);
         if (i == 0) {
             if (ignore_column_name) {
                 required_fields << "_col_" << arguments[i];
@@ -833,7 +452,7 @@ std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* bloc
     return std::make_pair(required_fields.str(), columns_types.str());
 }
 
-std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* block) {
+std::pair<std::string, std::string> IJniConnector::parse_table_schema(Block* block) {
     ColumnNumbers arguments;
     for (size_t i = 0; i < block->columns(); ++i) {
         arguments.emplace_back(i);
@@ -841,151 +460,42 @@ std::pair<std::string, std::string> JniConnector::parse_table_schema(Block* bloc
     return parse_table_schema(block, arguments, true);
 }
 
-void JniConnector::_collect_profile_before_close() {
-    if (!_jni_object_initialized && _profile != nullptr) {
-        JNIEnv* env = nullptr;
-        Status st = JniUtil::GetJNIEnv(&env);
-        if (!st) {
-            LOG(WARNING) << "failed to get jni env when collect profile: " << st;
-            return;
-        }
-        // update scanner metrics
-        for (const auto& metric : get_statistics(env)) {
-            std::vector<std::string> type_and_name = split(metric.first, ":");
-            if (type_and_name.size() != 2) {
-                LOG(WARNING) << "Name of JNI Scanner metric should be pattern like "
-                             << "'metricType:metricName'";
-                continue;
+Status IJniConnector::fill_block(Block* block, const ColumnNumbers& arguments, long table_address) {
+    if (table_address == 0) {
+        return Status::InternalError("table_address is 0");
+    }
+    TableMetaAddress table_meta(table_address);
+    long num_rows = table_meta.next_meta_as_long();
+    for (size_t i : arguments) {
+        if (block->get_by_position(i).column.get() == nullptr) {
+            auto return_type = block->get_data_type(i);
+            bool result_nullable = return_type->is_nullable();
+            ColumnUInt8::MutablePtr null_col = nullptr;
+            if (result_nullable) {
+                return_type = remove_nullable(return_type);
+                null_col = ColumnUInt8::create();
             }
-            long metric_value = std::stol(metric.second);
-            RuntimeProfile::Counter* scanner_counter;
-            if (type_and_name[0] == "timer") {
-                scanner_counter =
-                        ADD_CHILD_TIMER(_profile, type_and_name[1], _connector_name.c_str());
-            } else if (type_and_name[0] == "counter") {
-                scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::UNIT,
-                                                    _connector_name.c_str());
-            } else if (type_and_name[0] == "bytes") {
-                scanner_counter = ADD_CHILD_COUNTER(_profile, type_and_name[1], TUnit::BYTES,
-                                                    _connector_name.c_str());
+            auto res_col = return_type->create_column();
+            if (result_nullable) {
+                block->replace_by_position(
+                        i, ColumnNullable::create(std::move(res_col), std::move(null_col)));
             } else {
-                LOG(WARNING) << "Type of JNI Scanner metric should be timer, counter or bytes";
-                continue;
+                block->replace_by_position(i, std::move(res_col));
             }
-            COUNTER_UPDATE(scanner_counter, metric_value);
+        } else if (is_column_const(*(block->get_by_position(i).column))) {
+            auto doris_column = block->get_by_position(i).column->convert_to_full_column_if_const();
+            bool is_nullable = block->get_by_position(i).type->is_nullable();
+            block->replace_by_position(i, is_nullable ? make_nullable(doris_column) : doris_column);
         }
+        auto& column_with_type_and_name = block->get_by_position(i);
+        auto& column_ptr = column_with_type_and_name.column;
+        auto& column_type = column_with_type_and_name.type;
+        RETURN_IF_ERROR(_fill_column(table_meta, column_ptr, column_type, num_rows));
     }
-}
-
-Status JniConnector::open_writer(RuntimeState* state, RuntimeProfile* profile) {
-    _state = state;
-    _profile = profile;
-    ADD_TIMER(_profile, _connector_name.c_str());
-    _write_data_time = ADD_CHILD_TIMER(_profile, "WriteTime", _connector_name.c_str());
-    _finish_write_time = ADD_CHILD_TIMER(_profile, "FinishTime", _connector_name.c_str());
-    _open_writer_time = ADD_CHILD_TIMER(_profile, "OpenWriterTime", _connector_name.c_str());
-
-    // cannot put the env into fields, because frames in an env object is limited
-    // to avoid limited frames in a thread, we should get local env in a method instead of in whole object.
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-    SCOPED_TIMER(_open_writer_time);
-    _scanner_params.emplace("time_zone", _state->timezone());
-    RETURN_IF_ERROR(_init_jni_writer(env));
-    // Call open method: org.apache.doris.common.jni.JniWriter#open
-    env->CallVoidMethod(_jni_object, _jni_open);
-    RETURN_ERROR_IF_EXC(env);
-    _jni_object_initialized = true;
-    // Mark as writer mode
-    _is_writer = true;
     return Status::OK();
 }
 
-Status JniConnector::_init_jni_writer(JNIEnv* env) {
-    RETURN_IF_ERROR(JniUtil::get_jni_scanner_class(env, _connector_class.c_str(), &_jni_class));
-    if (_jni_class == nullptr) {
-        if (env->ExceptionOccurred()) {
-            env->ExceptionDescribe();
-        }
-        return Status::InternalError("Fail to get JniWriter class.");
-    }
-    RETURN_ERROR_IF_EXC(env);
+// TODO: Add remaining static utility methods (_fill_column, _fill_string_column, etc.)
+// These would be copied from the original backup file but are quite lengthy
 
-    // Writer constructor: JniWriter(Map<String, String> params)
-    jmethodID writer_constructor = env->GetMethodID(_jni_class, "<init>", "(Ljava/util/Map;)V");
-    RETURN_ERROR_IF_EXC(env);
-
-    // prepare constructor parameters
-    jobject hashmap_object = JniUtil::convert_to_java_map(env, _scanner_params);
-    jobject jni_writer_obj = env->NewObject(_jni_class, writer_constructor, hashmap_object);
-
-    RETURN_ERROR_IF_EXC(env);
-
-    // clean up constructor parameters
-    env->DeleteLocalRef(hashmap_object);
-    RETURN_ERROR_IF_EXC(env);
-
-    // Get method IDs for JniWriter methods
-    _jni_open = env->GetMethodID(_jni_class, "open", "()V");
-    _jni_writer_write_data = env->GetMethodID(_jni_class, "write", "(Ljava/util/Map;)V");
-    _jni_writer_finish_write = env->GetMethodID(_jni_class, "finish", "()V");
-    RETURN_ERROR_IF_EXC(env);
-    _jni_close = env->GetMethodID(_jni_class, "close", "()V");
-    _jni_release_column = env->GetMethodID(_jni_class, "releaseColumn", "(I)V");
-    _jni_release_table = env->GetMethodID(_jni_class, "releaseTable", "()V");
-    _jni_get_statistics = env->GetMethodID(_jni_class, "getStatistics", "()Ljava/util/Map;");
-    RETURN_IF_ERROR(JniUtil::LocalToGlobalRef(env, jni_writer_obj, &_jni_object));
-    env->DeleteLocalRef(jni_writer_obj);
-    RETURN_ERROR_IF_EXC(env);
-    return Status::OK();
-}
-
-Status JniConnector::write(Block* block) {
-    if (!_jni_object_initialized) {
-        return Status::InternalError("Writer is not opened.");
-    }
-
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-
-    SCOPED_TIMER(_write_data_time);
-
-    // prepare table meta information
-    std::unique_ptr<long[]> meta_data;
-    RETURN_IF_ERROR(JniConnector::to_java_table(block, meta_data));
-    long meta_address = (long)meta_data.get();
-    auto table_schema = JniConnector::parse_table_schema(block);
-
-    // prepare write parameters
-    std::map<String, String> write_params = {{"meta_address", std::to_string(meta_address)},
-                                             {"required_fields", table_schema.first},
-                                             {"columns_types", table_schema.second}};
-
-    jobject hashmap_object = JniUtil::convert_to_java_map(env, write_params);
-
-    // Call writeData method
-    env->CallVoidMethod(_jni_object, _jni_writer_write_data, hashmap_object);
-
-    env->DeleteLocalRef(hashmap_object);
-    RETURN_ERROR_IF_EXC(env);
-
-    return Status::OK();
-}
-
-Status JniConnector::finish() {
-    if (!_jni_object_initialized) {
-        return Status::InternalError("Writer is not opened.");
-    }
-
-    JNIEnv* env = nullptr;
-    RETURN_IF_ERROR(JniUtil::GetJNIEnv(&env));
-
-    SCOPED_TIMER(_finish_write_time);
-
-    // Call finishWrite method
-    env->CallVoidMethod(_jni_object, _jni_writer_finish_write);
-    RETURN_ERROR_IF_EXC(env);
-
-    return Status::OK();
-}
-} // namespace doris::vectorized
+} // namespace doris::vectorized 

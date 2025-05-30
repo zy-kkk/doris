@@ -18,7 +18,7 @@
 #pragma once
 
 #include <jni.h>
-#include <string.h>
+#include <cstring>
 
 #include <map>
 #include <memory>
@@ -54,10 +54,14 @@ class ColumnVector;
 
 namespace doris::vectorized {
 
+// Forward declarations
+class JniScanner;
+class JniWriter;
+
 /**
- * Connector to java jni scanner, which should extend org.apache.doris.common.jni.JniScanner
+ * Base interface for JNI connectors
  */
-class JniConnector : public ProfileCollector {
+class IJniConnector : public ProfileCollector {
 public:
     class TableMetaAddress {
     private:
@@ -98,7 +102,7 @@ public:
         std::vector<const CppType*> values;
         int scale;
 
-        ScanPredicate(const std::string column_name) : column_name(std::move(column_name)) {}
+        explicit ScanPredicate(std::string column_name) : column_name(std::move(column_name)) {}
 
         ScanPredicate(const ScanPredicate& other)
                 : column_name(other.column_name), op(other.op), scale(other.scale) {
@@ -179,84 +183,26 @@ public:
         }
     };
 
-    /**
-     * Use configuration map to provide scan information. The java side should determine how the parameters
-     * are parsed. For example, using "required_fields=col0,col1,...,colN" to provide the scan fields.
-     * @param connector_class Java scanner class
-     * @param scanner_params Provided configuration map
-     * @param column_names Fields to read, also the required_fields in scanner_params
-     */
-    JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params,
-                 std::vector<std::string> column_names, int64_t self_split_weight = -1)
+    IJniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params)
             : _connector_class(std::move(connector_class)),
-              _scanner_params(std::move(scanner_params)),
-              _column_names(std::move(column_names)),
-              _self_split_weight(self_split_weight) {
+              _scanner_params(std::move(scanner_params)) {
         // Use java class name as connector name
         _connector_name = split(_connector_class, "/").back();
     }
 
-    /**
-     * Just use to get the table schema.
-     * @param connector_class Java scanner class
-     * @param scanner_params Provided configuration map
-     */
-    JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params)
-            : _connector_class(std::move(connector_class)),
-              _scanner_params(std::move(scanner_params)) {
-        _is_table_schema = true;
-        _connector_name = split(_connector_class, "/").back();
-    }
-
-    ~JniConnector() override = default;
+    ~IJniConnector() override = default;
 
     /**
-     * Open java scanner, and get the following scanner methods by jni:
-     * 1. getNextBatchMeta: read next batch and return the address of meta information
-     * 2. close: close java scanner, and release jni resources
-     * 3. releaseColumn: release a single column
-     * 4. releaseTable: release current batch, which will also release columns and meta information
+     * Close connector and release jni resources.
      */
-    Status open(RuntimeState* state, RuntimeProfile* profile);
+    virtual Status close() = 0;
 
     /**
-     * Should call before open, parse the pushed down filters. The value ranges can be stored as byte array in heap:
-     * number_filters(4) | length(4) | column_name | op(4) | scale(4) | num_values(4) | value_length(4) | value | ...
-     * Then, pass the byte array address in configuration map, like "push_down_predicates=${address}"
+     * Get performance metrics from java scanner/writer
      */
-    Status init(
-            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+    virtual std::map<std::string, std::string> get_statistics(JNIEnv* env) = 0;
 
-    /**
-     * Call java side function JniScanner.getNextBatchMeta. The columns information are stored as long array:
-     *                            | number of rows |
-     *                            | null indicator start address of fixed length column-A |
-     *                            | data column start address of the fixed length column-A  |
-     *                            | ... |
-     *                            | null indicator start address of variable length column-B |
-     *                            | offset column start address of the variable length column-B |
-     *                            | data column start address of the variable length column-B |
-     *                            | ... |
-     */
-    Status get_next_block(Block* block, size_t* read_rows, bool* eof);
-
-    /**
-     * Get performance metrics from java scanner
-     */
-    std::map<std::string, std::string> get_statistics(JNIEnv* env);
-
-    /**
-     * Call java side function JniScanner.getTableSchema.
-     *
-     * The schema information are stored as json format
-     */
-    Status get_table_schema(std::string& table_schema_str);
-
-    /**
-     * Close scanner and release jni resources.
-     */
-    Status close();
-
+    // Static utility methods
     static std::string get_jni_type(const DataTypePtr& data_type);
     static std::string get_jni_type_with_different_string(const DataTypePtr& data_type);
 
@@ -273,39 +219,15 @@ public:
 
     static Status fill_block(Block* block, const ColumnNumbers& arguments, long table_address);
 
-    // Writer specific methods
-    Status open_writer(RuntimeState* state, RuntimeProfile* profile);
-    Status write(Block* block);
-    Status finish();
-
 protected:
     void _collect_profile_before_close() override;
 
-private:
     std::string _connector_name;
     std::string _connector_class;
     std::map<std::string, std::string> _scanner_params;
-    std::vector<std::string> _column_names;
-    int32_t _self_split_weight;
-    bool _is_table_schema = false;
-    // Flag to distinguish writer vs scanner mode
-    bool _is_writer = false;
 
     RuntimeState* _state = nullptr;
     RuntimeProfile* _profile = nullptr;
-    RuntimeProfile::Counter* _open_scanner_time = nullptr;
-    RuntimeProfile::Counter* _java_scan_time = nullptr;
-    RuntimeProfile::Counter* _java_append_data_time = nullptr;
-    RuntimeProfile::Counter* _java_create_vector_table_time = nullptr;
-    RuntimeProfile::Counter* _fill_block_time = nullptr;
-    std::map<std::string, RuntimeProfile::Counter*> _scanner_profile;
-    RuntimeProfile::ConditionCounter* _max_time_split_weight_counter = nullptr;
-
-    int64_t _jni_scanner_open_watcher = 0;
-    int64_t _java_scan_watcher = 0;
-    int64_t _fill_block_watcher = 0;
-
-    size_t _has_read = 0;
 
     // General JNI objects and classes
     bool _closed = false;
@@ -320,37 +242,9 @@ private:
     jmethodID _jni_release_column;
     jmethodID _jni_release_table;
 
-    // Scanner JNI method IDs
-    jmethodID _jni_scanner_get_next_batch;
-    jmethodID _jni_scanner_get_table_schema;
-
-    // Writer JNI method IDs
-    jmethodID _jni_writer_write_data = nullptr;
-    jmethodID _jni_writer_finish_write = nullptr;
-    jmethodID _jni_scanner_get_append_data_time = nullptr;
-    jmethodID _jni_scanner_get_create_vector_table_time = nullptr;
-
     TableMetaAddress _table_meta;
 
-    int _predicates_length = 0;
-    std::unique_ptr<char[]> _predicates;
-
-    // Writer specific timers
-    RuntimeProfile::Counter* _open_writer_time = nullptr;
-    RuntimeProfile::Counter* _write_data_time = nullptr;
-    RuntimeProfile::Counter* _finish_write_time = nullptr;
-
-    /**
-     * Set the address of meta information, which is returned by org.apache.doris.common.jni.JniScanner#getNextBatchMeta
-     */
-    void _set_meta(long meta_addr) { _table_meta.set_meta(meta_addr); }
-
-    Status _init_jni_scanner(JNIEnv* env, int batch_size);
-
-    Status _init_jni_writer(JNIEnv* env);
-
-    Status _fill_block(Block* block, size_t num_rows);
-
+    // Static utility methods
     static Status _fill_column(TableMetaAddress& address, ColumnPtr& doris_column,
                                DataTypePtr& data_type, size_t num_rows);
 
@@ -381,62 +275,55 @@ private:
 
     template <typename COLUMN_TYPE>
     static long _get_fixed_length_column_address(const IColumn& doris_column) {
-        return (long)assert_cast<const COLUMN_TYPE&>(doris_column).get_data().data();
+        return reinterpret_cast<long>(assert_cast<const COLUMN_TYPE&>(doris_column).get_data().data());
     }
+};
 
-    void _generate_predicates(
-            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+/**
+ * Backward compatibility wrapper for JniConnector
+ * This class maintains the original interface while delegating to the appropriate implementation
+ */
+class JniConnector {
+public:
+    // Scanner constructor
+    JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params,
+                 std::vector<std::string> column_names, int64_t self_split_weight = -1);
 
-    template <PrimitiveType primitive_type>
-    void _parse_value_range(const ColumnValueRange<primitive_type>& col_val_range,
-                            const std::string& column_name) {
-        using CppType = std::conditional_t<primitive_type == TYPE_HLL, StringRef,
-                                           typename PrimitiveTypeTraits<primitive_type>::CppType>;
+    // Table schema constructor
+    JniConnector(std::string connector_class, std::map<std::string, std::string> scanner_params);
 
-        if (col_val_range.is_fixed_value_range()) {
-            ScanPredicate<CppType> in_predicate(column_name);
-            in_predicate.op = SQLFilterOp::FILTER_IN;
-            in_predicate.scale = col_val_range.scale();
-            for (const auto& value : col_val_range.get_fixed_value_set()) {
-                in_predicate.values.emplace_back(&value);
-            }
-            if (!in_predicate.values.empty()) {
-                _predicates_length = in_predicate.write(_predicates, _predicates_length);
-            }
-            return;
-        }
+    ~JniConnector() = default;
 
-        const CppType high_value = col_val_range.get_range_max_value();
-        const CppType low_value = col_val_range.get_range_min_value();
-        const SQLFilterOp high_op = col_val_range.get_range_high_op();
-        const SQLFilterOp low_op = col_val_range.get_range_low_op();
+    // Scanner methods
+    Status open(RuntimeState* state, RuntimeProfile* profile);
+    Status init(const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+    Status get_next_block(Block* block, size_t* read_rows, bool* eof);
+    Status get_table_schema(std::string& table_schema_str);
 
-        // orc can only push down is_null. When col_value_range._contain_null = true, only indicating that
-        // value can be null, not equals null, so ignore _contain_null in col_value_range
-        if (col_val_range.is_high_value_maximum() && high_op == SQLFilterOp::FILTER_LESS_OR_EQUAL &&
-            col_val_range.is_low_value_mininum() && low_op == SQLFilterOp::FILTER_LARGER_OR_EQUAL) {
-            return;
-        }
+    // Writer methods
+    Status open_writer(RuntimeState* state, RuntimeProfile* profile);
+    Status write(Block* block);
+    Status finish();
 
-        if (low_value < high_value) {
-            if (!col_val_range.is_low_value_mininum() ||
-                SQLFilterOp::FILTER_LARGER_OR_EQUAL != low_op) {
-                ScanPredicate<CppType> low_predicate(column_name);
-                low_predicate.scale = col_val_range.scale();
-                low_predicate.op = low_op;
-                low_predicate.values.emplace_back(col_val_range.get_range_min_value_ptr());
-                _predicates_length = low_predicate.write(_predicates, _predicates_length);
-            }
-            if (!col_val_range.is_high_value_maximum() ||
-                SQLFilterOp::FILTER_LESS_OR_EQUAL != high_op) {
-                ScanPredicate<CppType> high_predicate(column_name);
-                high_predicate.scale = col_val_range.scale();
-                high_predicate.op = high_op;
-                high_predicate.values.emplace_back(col_val_range.get_range_max_value_ptr());
-                _predicates_length = high_predicate.write(_predicates, _predicates_length);
-            }
-        }
-    }
+    // Common methods
+    std::map<std::string, std::string> get_statistics(JNIEnv* env);
+    Status close();
+
+    // Static utility methods
+    static std::string get_jni_type(const DataTypePtr& data_type);
+    static std::string get_jni_type_with_different_string(const DataTypePtr& data_type);
+    static Status to_java_table(Block* block, size_t num_rows, const ColumnNumbers& arguments,
+                                std::unique_ptr<long[]>& meta);
+    static Status to_java_table(Block* block, std::unique_ptr<long[]>& meta);
+    static std::pair<std::string, std::string> parse_table_schema(Block* block,
+                                                                  const ColumnNumbers& arguments,
+                                                                  bool ignore_column_name = true);
+    static std::pair<std::string, std::string> parse_table_schema(Block* block);
+    static Status fill_block(Block* block, const ColumnNumbers& arguments, long table_address);
+
+private:
+    std::unique_ptr<IJniConnector> _impl;
+    bool _is_writer = false;
 };
 
 } // namespace doris::vectorized

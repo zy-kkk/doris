@@ -27,7 +27,6 @@ import com.fasterxml.jackson.databind.Module;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import io.airlift.json.ObjectMapperProvider;
-import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.block.BlockJsonSerde;
 import io.trino.metadata.BlockEncodingManager;
@@ -44,7 +43,6 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
@@ -58,13 +56,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -129,7 +124,7 @@ public class TrinoConnectorJniWriter extends JniWriter {
 
         connectorTransactionHandle = connector.beginTransaction(
                 io.trino.spi.transaction.IsolationLevel.READ_UNCOMMITTED, true, true);
-            
+
         ConnectorSession connectorSession = session.toConnectorSession(catalogHandle);
         metadata = connector.getMetadata(connectorSession, connectorTransactionHandle);
 
@@ -147,7 +142,7 @@ public class TrinoConnectorJniWriter extends JniWriter {
                     public long getId() {
                         return 0;
                     }
-                 });
+                    });
     }
 
     private ConnectorPageSinkProvider getConnectorPageSinkProvider() {
