@@ -517,6 +517,16 @@ public class S3ObjStorage implements ObjStorage<S3Client> {
     }
 
     /**
+     * Check if the bucket name suggests this is a Directory Bucket.
+     * Directory buckets have naming patterns like:
+     * - bucket-name--az-id--x-s3 (for zonal directory buckets)
+     * - bucket-name--region--x-s3 (for regional directory buckets)
+     */
+    private boolean isDirectoryBucket(String bucketName) {
+        return bucketName != null && bucketName.contains("--") && bucketName.endsWith("--x-s3");
+    }
+
+    /**
      * List all files under the given path with glob pattern.
      * For example, if the path is "s3://bucket/path/to/*.csv",
      * it will list all files under "s3://bucket/path/to/" with ".csv" suffix.
@@ -544,9 +554,28 @@ public class S3ObjStorage implements ObjStorage<S3Client> {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("globList listPrefix: {}", listPrefix);
             }
+
+            // For Directory Buckets, adjust prefix if it doesn't end with delimiter
+            boolean isDirectoryBucket = isDirectoryBucket(bucket);
+
+            // Adjust prefix for Directory Bucket requirements upfront
+            String finalPrefix = listPrefix;
+            if (isDirectoryBucket && !finalPrefix.isEmpty() && !finalPrefix.endsWith("/")) {
+                int lastSlashIndex = finalPrefix.lastIndexOf('/');
+                if (lastSlashIndex >= 0) {
+                    finalPrefix = finalPrefix.substring(0, lastSlashIndex + 1);
+                } else {
+                    finalPrefix = "";
+                }
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Directory bucket detected, adjusting prefix from '{}' to '{}'",
+                            listPrefix, finalPrefix);
+                }
+            }
+
             ListObjectsV2Request request = ListObjectsV2Request.builder()
                     .bucket(bucket)
-                    .prefix(listPrefix)
+                    .prefix(finalPrefix)
                     .build();
 
             boolean isTruncated = false;
