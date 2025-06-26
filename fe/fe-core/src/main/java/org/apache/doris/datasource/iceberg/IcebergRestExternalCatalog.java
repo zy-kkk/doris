@@ -17,21 +17,27 @@
 
 package org.apache.doris.datasource.iceberg;
 
+
 import org.apache.doris.datasource.CatalogProperty;
 import org.apache.doris.datasource.property.PropertyConverter;
 import org.apache.doris.datasource.property.constants.S3Properties;
 
+import com.google.common.collect.Maps;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.aws.AwsClientProperties;
 import org.apache.iceberg.aws.s3.S3FileIOProperties;
+import org.apache.iceberg.rest.auth.OAuth2Properties;
 
-import java.util.HashMap;
 import java.util.Map;
 
 public class IcebergRestExternalCatalog extends IcebergExternalCatalog {
+
+    public static final String VENDED_CREDENTIALS_ENABLED = "iceberg.rest.vended-credentials.enabled";
+    public static final String DELEGATION_HEADER = "header.X-Iceberg-Access-Delegation";
+    public static final String DELEGATION_VENDED_CREDENTIALS = "vended-credentials";
 
     public IcebergRestExternalCatalog(long catalogId, String name, String resource, Map<String, String> props,
                                       String comment) {
@@ -69,10 +75,61 @@ public class IcebergRestExternalCatalog extends IcebergExternalCatalog {
     private Map<String, String> convertToRestCatalogProperties() {
 
         Map<String, String> props = catalogProperty.getProperties();
-        Map<String, String> restProperties = new HashMap<>(props);
+        Map<String, String> restProperties = Maps.newHashMap();
+
         restProperties.put(CatalogUtil.ICEBERG_CATALOG_TYPE, CatalogUtil.ICEBERG_CATALOG_TYPE_REST);
         String restUri = props.getOrDefault(CatalogProperties.URI, "");
         restProperties.put(CatalogProperties.URI, restUri);
+        String warehouse = props.getOrDefault(CatalogProperties.WAREHOUSE_LOCATION, "");
+        restProperties.put(CatalogProperties.WAREHOUSE_LOCATION, warehouse);
+
+        // Handle authentication
+        String authType = props.getOrDefault("iceberg.rest.security", "none");
+        if ("oauth2".equalsIgnoreCase(authType)) {
+            // Validate OAuth2 configuration
+            boolean hasCredential = props.containsKey("iceberg.rest.oauth2.credential");
+            boolean hasToken = props.containsKey("iceberg.rest.oauth2.token");
+            if (!hasCredential && !hasToken) {
+                throw new IllegalArgumentException("OAuth2 requires either credential or token");
+            }
+            if (hasCredential && hasToken) {
+                throw new IllegalArgumentException("OAuth2 cannot have both credential and token configured");
+            }
+            if (hasCredential) {
+                // Client Credentials Flow
+                restProperties.put(OAuth2Properties.CREDENTIAL, props.get("iceberg.rest.oauth2.credential"));
+
+                // Server URI is required for credential flow
+                if (props.containsKey("iceberg.rest.oauth2.server-uri")) {
+                    restProperties.put(OAuth2Properties.OAUTH2_SERVER_URI,
+                            props.get("iceberg.rest.oauth2.server-uri"));
+                } else {
+                    throw new IllegalArgumentException("OAuth2 credential flow requires server-uri");
+                }
+                // Scope is optional for credential flow
+                if (props.containsKey("iceberg.rest.oauth2.scope")) {
+                    restProperties.put(OAuth2Properties.SCOPE, props.get("iceberg.rest.oauth2.scope"));
+                }
+                // Token refresh control (default: true)
+                String tokenRefreshEnabled = props.getOrDefault("iceberg.rest.oauth2.token-refresh-enabled",
+                        "true");
+                restProperties.put(OAuth2Properties.TOKEN_REFRESH_ENABLED, tokenRefreshEnabled);
+            } else {
+                // Pre-configured Token Flow
+                restProperties.put(OAuth2Properties.TOKEN, props.get("iceberg.rest.oauth2.token"));
+                // Validate that scope is not used with token
+                if (props.containsKey("iceberg.rest.oauth2.scope")) {
+                    throw new IllegalArgumentException(
+                            "OAuth2 scope is only applicable when using credential, not token");
+                }
+            }
+        }
+        // For "none" authentication, no additional properties needed (default behavior)
+
+        if (Boolean.parseBoolean(props.getOrDefault(VENDED_CREDENTIALS_ENABLED, "false"))) {
+            restProperties.put(DELEGATION_HEADER, DELEGATION_VENDED_CREDENTIALS);
+        }
+
         if (props.containsKey(S3Properties.ENDPOINT)) {
             restProperties.put(S3FileIOProperties.ENDPOINT, props.get(S3Properties.ENDPOINT));
         }

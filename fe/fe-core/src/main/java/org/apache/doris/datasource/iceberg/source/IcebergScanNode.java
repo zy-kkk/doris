@@ -35,7 +35,9 @@ import org.apache.doris.datasource.TableFormatType;
 import org.apache.doris.datasource.hive.HMSExternalTable;
 import org.apache.doris.datasource.iceberg.IcebergExternalCatalog;
 import org.apache.doris.datasource.iceberg.IcebergExternalTable;
+import org.apache.doris.datasource.iceberg.IcebergRestExternalCatalog;
 import org.apache.doris.datasource.iceberg.IcebergUtils;
+import org.apache.doris.datasource.property.constants.S3Properties;
 import org.apache.doris.nereids.exceptions.NotSupportedException;
 import org.apache.doris.planner.PlanNodeId;
 import org.apache.doris.qe.SessionVariable;
@@ -74,6 +76,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -86,6 +89,10 @@ public class IcebergScanNode extends FileQueryScanNode {
 
     public static final int MIN_DELETE_FILE_SUPPORT_VERSION = 2;
     private static final Logger LOG = LogManager.getLogger(IcebergScanNode.class);
+
+    private static final String VENDED_S3_ACCESS_KEY = "s3.access-key-id";
+    private static final String VENDED_S3_SECRET_KEY = "s3.secret-access-key";
+    private static final String VENDED_S3_SESSION_TOKEN = "s3.session-token";
 
     private IcebergSource source;
     private Table icebergTable;
@@ -487,7 +494,32 @@ public class IcebergScanNode extends FileQueryScanNode {
 
     @Override
     public Map<String, String> getLocationProperties() throws UserException {
-        return source.getCatalog().getCatalogProperty().getHadoopProperties();
+        // 1. Get static properties from catalog as base
+        // Use HashMap to make it mutable
+        Map<String, String> properties = new HashMap<>(source.getCatalog().getCatalogProperty().getHadoopProperties());
+
+        // 2. Check if vended credentials feature is enabled
+        boolean vendedEnabled = Boolean.parseBoolean(source.getCatalog().getCatalogProperty()
+                .getProperties().getOrDefault(IcebergRestExternalCatalog.VENDED_CREDENTIALS_ENABLED, "false"));
+
+        // 3. If enabled, try to merge dynamic credentials.
+        // icebergTable is initialized in doInitialize()
+        if (vendedEnabled && icebergTable != null) {
+            Map<String, String> ioProps = icebergTable.io().properties();
+
+            // 4. If REST service returns temp credentials, use them to override base properties.
+            // Map iceberg keys to Doris FE keys (S3Properties.*).
+            // These keys will be converted to BE keys by S3ClientBEProperties later.
+            if (ioProps.containsKey(VENDED_S3_ACCESS_KEY)) {
+                properties.put(S3Properties.Env.ACCESS_KEY, ioProps.get(VENDED_S3_ACCESS_KEY));
+                properties.put(S3Properties.Env.SECRET_KEY, ioProps.get(VENDED_S3_SECRET_KEY));
+                // SESSION_TOKEN is the core of vended credentials
+                if (ioProps.containsKey(VENDED_S3_SESSION_TOKEN)) {
+                    properties.put(S3Properties.Env.TOKEN, ioProps.get(VENDED_S3_SESSION_TOKEN));
+                }
+            }
+        }
+        return properties;
     }
 
     @Override
