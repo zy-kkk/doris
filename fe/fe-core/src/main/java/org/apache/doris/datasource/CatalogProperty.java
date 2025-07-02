@@ -142,6 +142,20 @@ public class CatalogProperty {
         this.storagePropertiesMap = null;
     }
 
+    public MetastoreProperties getMetastoreProperties() {
+        if (MapUtils.isEmpty(getProperties())) {
+            return null;
+        }
+        if (metastoreProperties == null) {
+            try {
+                metastoreProperties = MetastoreProperties.create(getProperties());
+            } catch (UserException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return metastoreProperties;
+    }
+
     public Map<StorageProperties.Type, StorageProperties> getStoragePropertiesMap() {
         if (storagePropertiesMap == null) {
             synchronized (this) {
