@@ -34,6 +34,7 @@ import org.apache.doris.datasource.hive.HMSExternalTable;
 import org.apache.doris.datasource.iceberg.IcebergExternalCatalog;
 import org.apache.doris.datasource.iceberg.IcebergExternalTable;
 import org.apache.doris.datasource.iceberg.IcebergUtils;
+import org.apache.doris.datasource.property.metastore.IcebergRestProperties;
 import org.apache.doris.nereids.exceptions.NotSupportedException;
 import org.apache.doris.planner.PlanNodeId;
 import org.apache.doris.qe.SessionVariable;
@@ -62,6 +63,7 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
+import org.apache.iceberg.aws.s3.S3FileIOProperties;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
@@ -486,7 +488,30 @@ public class IcebergScanNode extends FileQueryScanNode {
 
     @Override
     public Map<String, String> getLocationProperties() throws UserException {
-        return source.getCatalog().getCatalogProperty().getHadoopProperties();
+        Map<String, String> locationProperties = source.getCatalog().getCatalogProperty().getHadoopProperties();
+        boolean useVendedCredentials = false;
+        if (IcebergExternalCatalog.ICEBERG_REST
+                .equals(((IcebergExternalCatalog) source.getCatalog()).getIcebergCatalogType())) {
+            IcebergRestProperties restProps = (IcebergRestProperties) source.getCatalog().getCatalogProperty()
+                    .getMetastoreProperties();
+            if (restProps.isIcebergRestVendedCredentialsEnabled()) {
+                useVendedCredentials = true;
+            }
+        }
+
+        if (useVendedCredentials) {
+            Map<String, String> ioProps = icebergTable.io().properties();
+            if (ioProps.containsKey(S3FileIOProperties.ACCESS_KEY_ID)) {
+                locationProperties.put("AWS_ACCESS_KEY", ioProps.get(S3FileIOProperties.ACCESS_KEY_ID));
+            }
+            if (ioProps.containsKey(S3FileIOProperties.SECRET_ACCESS_KEY)) {
+                locationProperties.put("AWS_SECRET_KEY", ioProps.get(S3FileIOProperties.SECRET_ACCESS_KEY));
+            }
+            if (ioProps.containsKey(S3FileIOProperties.SESSION_TOKEN)) {
+                locationProperties.put("AWS_TOKEN", ioProps.get(S3FileIOProperties.SESSION_TOKEN));
+            }
+        }
+        return locationProperties;
     }
 
     @VisibleForTesting
