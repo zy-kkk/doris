@@ -344,24 +344,48 @@ Status BlockFileCache::initialize_unlocked(std::lock_guard<std::mutex>& cache_lo
     }
     RETURN_IF_ERROR(_storage->init(this));
     _cache_background_monitor_thread = std::thread(&BlockFileCache::run_background_monitor, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_monitor");
+#else
     pthread_setname_np(_cache_background_monitor_thread.native_handle(), "run_background_monitor");
+#endif
     _cache_background_ttl_gc_thread = std::thread(&BlockFileCache::run_background_ttl_gc, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_ttl_gc");
+#else
     pthread_setname_np(_cache_background_ttl_gc_thread.native_handle(), "run_background_ttl_gc");
+#endif
     _cache_background_gc_thread = std::thread(&BlockFileCache::run_background_gc, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_gc");
+#else
     pthread_setname_np(_cache_background_gc_thread.native_handle(), "run_background_gc");
+#endif
     _cache_background_evict_in_advance_thread =
             std::thread(&BlockFileCache::run_background_evict_in_advance, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_evict_in_advance");
+#else
     pthread_setname_np(_cache_background_evict_in_advance_thread.native_handle(),
                        "run_background_evict_in_advance");
+#endif
 
     // Initialize LRU dump thread and restore queues
     _cache_background_lru_dump_thread = std::thread(&BlockFileCache::run_background_lru_dump, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_lru_dump");
+#else
     pthread_setname_np(_cache_background_lru_dump_thread.native_handle(),
                        "run_background_lru_dump");
+#endif
     _cache_background_lru_log_replay_thread =
             std::thread(&BlockFileCache::run_background_lru_log_replay, this);
+#ifdef __APPLE__
+    pthread_setname_np("run_background_lru_log_replay");
+#else
     pthread_setname_np(_cache_background_lru_log_replay_thread.native_handle(),
                        "run_background_lru_log_replay");
+#endif
 
     return Status::OK();
 }

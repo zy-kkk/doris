@@ -17,8 +17,15 @@
 
 #include "io/cache/cache_lru_dumper.h"
 
+#include "gutil/endian.h"
+
+// Use existing to_endian function from gutil/endian.h
+#define htole64(x) to_endian<std::endian::little>(static_cast<uint64_t>(x))
+#define le64toh(x) to_endian<std::endian::little>(static_cast<uint64_t>(x))
+#define htole32(x) to_endian<std::endian::little>(static_cast<uint32_t>(x))
+#define le32toh(x) to_endian<std::endian::little>(static_cast<uint32_t>(x))
+
 #include "io/cache/block_file_cache.h"
-#include "io/cache/cache_lru_dumper.h"
 #include "io/cache/lru_queue_recorder.h"
 #include "util/crc32c.h"
 
