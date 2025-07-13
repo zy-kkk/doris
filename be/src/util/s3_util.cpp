@@ -81,6 +81,11 @@ doris::Status is_s3_conf_valid(const S3ClientConf& conf) {
         return Status::InvalidArgument<false>("Invalid s3 conf, empty region");
     }
 
+    // 检测是否为公共存储桶访问，如果是则跳过认证验证
+    if (conf.force_public_access) {
+        return Status::OK();
+    }
+
     if (conf.role_arn.empty()) {
         if (conf.ak.empty()) {
             return Status::InvalidArgument<false>("Invalid s3 conf, empty ak");
@@ -114,6 +119,7 @@ constexpr char S3_NEED_OVERRIDE_ENDPOINT[] = "AWS_NEED_OVERRIDE_ENDPOINT";
 
 constexpr char S3_ROLE_ARN[] = "AWS_ROLE_ARN";
 constexpr char S3_EXTERNAL_ID[] = "AWS_EXTERNAL_ID";
+constexpr char S3_FORCE_PUBLIC_ACCESS[] = "FORCE_PUBLIC_ACCESS";
 } // namespace
 
 bvar::Adder<int64_t> get_rate_limit_ns("get_rate_limit_ns");
@@ -404,6 +410,10 @@ Status S3ClientFactory::convert_properties_to_s3_conf(
 
     if (auto it = properties.find(S3_EXTERNAL_ID); it != properties.end()) {
         s3_conf->client_conf.external_id = it->second;
+    }
+
+    if (auto it = properties.find(S3_FORCE_PUBLIC_ACCESS); it != properties.end()) {
+        s3_conf->client_conf.force_public_access = (it->second == "true");
     }
 
     if (auto st = is_s3_conf_valid(s3_conf->client_conf); !st.ok()) {

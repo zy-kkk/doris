@@ -153,6 +153,11 @@ public class S3Util {
 
     public static S3Client buildS3Client(URI endpoint, String region, boolean isUsePathStyle,
                                          AwsCredentialsProvider credential) {
+        return buildS3Client(endpoint, region, isUsePathStyle, credential, false);
+    }
+
+    public static S3Client buildS3Client(URI endpoint, String region, boolean isUsePathStyle,
+                                         AwsCredentialsProvider credential, boolean isPublicAccess) {
         EqualJitterBackoffStrategy backoffStrategy = EqualJitterBackoffStrategy
                 .builder()
                 .baseDelay(Duration.ofSeconds(1))
@@ -164,13 +169,19 @@ public class S3Util {
                 .numRetries(3)
                 .backoffStrategy(backoffStrategy)
                 .build();
-        ClientOverrideConfiguration clientConf = ClientOverrideConfiguration
+        
+        ClientOverrideConfiguration.Builder clientConfBuilder = ClientOverrideConfiguration
                 .builder()
                 // set retry policy
-                .retryPolicy(retryPolicy)
-                // using AwsS3V4Signer
-                .putAdvancedOption(SdkAdvancedClientOption.SIGNER, AwsS3V4Signer.create())
-                .build();
+                .retryPolicy(retryPolicy);
+                
+        // 公共访问时不使用签名器
+        if (!isPublicAccess) {
+            clientConfBuilder.putAdvancedOption(SdkAdvancedClientOption.SIGNER, AwsS3V4Signer.create());
+        }
+        
+        ClientOverrideConfiguration clientConf = clientConfBuilder.build();
+        
         return S3Client.builder()
                 .httpClient(UrlConnectionHttpClient.builder().socketTimeout(Duration.ofSeconds(30))
                         .connectionTimeout(Duration.ofSeconds(30)).build())

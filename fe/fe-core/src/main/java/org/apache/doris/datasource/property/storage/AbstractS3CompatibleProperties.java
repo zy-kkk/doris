@@ -93,6 +93,12 @@ public abstract class AbstractS3CompatibleProperties extends StorageProperties i
             description = "The session token of S3.")
     protected String sessionToken = "";
 
+    @Getter
+    @ConnectorProperty(names = {"s3.force_public_access", "force_public_access"},
+            required = false,
+            description = "Force public access to S3-compatible storage without authentication.")
+    protected String forcePublicAccess = "";
+
     /**
      * Constructor to initialize the object storage properties with the provided type and original properties map.
      *
@@ -156,10 +162,20 @@ public abstract class AbstractS3CompatibleProperties extends StorageProperties i
 
     @Override
     public Map<String, String> getBackendConfigProperties() {
-        return generateBackendS3Configuration();
+        Map<String, String> backendProperties = generateBackendS3Configuration();
+
+        if (StringUtils.isNotBlank(forcePublicAccess)) {
+            backendProperties.put("FORCE_PUBLIC_ACCESS", forcePublicAccess);
+        }
+
+        return backendProperties;
     }
 
     public AwsCredentialsProvider getAwsCredentialsProvider() {
+        if (isPublicBucketAccess()) {
+            return software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider.create();
+        }
+
         if (StringUtils.isNotBlank(getAccessKey()) && StringUtils.isNotBlank(getSecretKey())) {
             if (Strings.isNullOrEmpty(sessionToken)) {
                 return StaticCredentialsProvider.create(AwsBasicCredentials.create(getAccessKey(), getSecretKey()));
@@ -179,11 +195,23 @@ public abstract class AbstractS3CompatibleProperties extends StorageProperties i
         if (!isValidEndpoint(getEndpoint())) {
             throw new IllegalArgumentException("Invalid endpoint format: " + getEndpoint());
         }
-        checkRequiredProperties();
+        // 注意：这里不再调用 checkRequiredProperties()，因为它已经在 super.initNormalizeAndCheckProps() 中被调用了
         initRegionIfNecessary();
         if (StringUtils.isBlank(getRegion())) {
             throw new IllegalArgumentException("region is required");
         }
+    }
+
+    @Override
+    protected void checkRequiredProperties() {
+        if (isPublicBucketAccess()) {
+            return;
+        }
+        super.checkRequiredProperties();
+    }
+
+    protected boolean isPublicBucketAccess() {
+        return "true".equalsIgnoreCase(forcePublicAccess);
     }
 
     private void initRegionIfNecessary() {

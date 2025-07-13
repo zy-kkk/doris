@@ -81,6 +81,8 @@ struct S3ClientConf {
     CredProviderType cred_provider_type = CredProviderType::Default;
     std::string role_arn;
     std::string external_id;
+    
+    bool force_public_access = false;
 
     uint64_t get_hash() const {
         uint64_t hash_code = 0;
