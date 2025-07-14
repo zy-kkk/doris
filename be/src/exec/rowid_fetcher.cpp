@@ -37,6 +37,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
+
 #include "bthread/countdown_event.h"
 #include "cloud/cloud_storage_engine.h"
 #include "cloud/cloud_tablet.h"
@@ -774,6 +778,20 @@ Status RowIdStorageReader::read_batch_external_row(
     DCHECK(remote_scan_sched);
 
     int64_t scan_running_time = 0;
+
+    // Define semaphore operations outside the lambda to avoid macro issues
+#ifdef __APPLE__
+    auto create_semaphore = [](int max_count) { return dispatch_semaphore_create(max_count); };
+    auto acquire_semaphore_func = [](dispatch_semaphore_t sem) {
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    };
+    auto release_semaphore_func = [](dispatch_semaphore_t sem) { dispatch_semaphore_signal(sem); };
+#else
+    auto create_semaphore = [](int max_count) { return std::counting_semaphore<>(max_count); };
+    auto acquire_semaphore_func = [](auto& sem) { sem.acquire(); };
+    auto release_semaphore_func = [](auto& sem) { sem.release(); };
+#endif
+
     RETURN_IF_ERROR(scope_timer_run(
             [&]() -> Status {
                 // Make sure to insert data into result_block only after all scan tasks have been executed.
@@ -782,14 +800,14 @@ Status RowIdStorageReader::read_batch_external_row(
                 std::mutex mtx;
 
                 //semaphore: Limit the number of scan tasks submitted at one time
-                std::counting_semaphore semaphore {max_file_scanners};
+                auto semaphore = create_semaphore(max_file_scanners);
 
                 size_t idx = 0;
                 for (const auto& [_, scan_info] : scan_rows) {
-                    semaphore.acquire();
-                    RETURN_IF_ERROR(
+                    acquire_semaphore_func(semaphore);
+                    auto task_result =
                             remote_scan_sched->submit_scan_task(vectorized::SimplifiedScanTask(
-                                    [&, scan_info, idx]() {
+                                    [&, scan_info, idx, semaphore, release_semaphore_func]() {
                                         auto& row_ids = scan_info.first;
                                         auto& file_mapping = scan_info.second;
 
@@ -871,14 +889,15 @@ Status RowIdStorageReader::read_batch_external_row(
                                                             file_read_times_counter->type());
                                         }
 
-                                        semaphore.release();
+                                        release_semaphore_func(semaphore);
                                         if (++producer_count == scan_rows.size()) {
                                             std::lock_guard<std::mutex> lock(mtx);
                                             cv.notify_one();
                                         }
                                         return Status::OK();
                                     },
-                                    nullptr)));
+                                    nullptr));
+                    RETURN_IF_ERROR(task_result);
                     idx++;
                 }
 

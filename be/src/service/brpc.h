@@ -21,6 +21,15 @@
 #undef EINTERNAL
 #endif
 
+// Fix for MacOS when PCH is disabled
+#ifdef __APPLE__
+#include <netinet/in.h>
+#include <sys/_types/_u_int.h>
+#else
+#include <arpa/inet.h>
+#include <sys/types.h>
+#endif
+
 // all header need by brpc is contain in this file.
 // include this file instead of include <brpc/xxx.h>.
 #include <brpc/channel.h>

@@ -189,7 +189,7 @@ private:
     void update(std::function<void(DebugPointMap&)>&& handler);
 
 private:
-    std::atomic<std::shared_ptr<const DebugPointMap>> _debug_points;
+    std::shared_ptr<const DebugPointMap> _debug_points;
 };
 
 } // namespace doris
