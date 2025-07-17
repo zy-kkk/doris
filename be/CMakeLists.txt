@@ -318,6 +318,14 @@ if (COMPILER_CLANG)
                         -Wno-implicit-int-conversion
                         -Wno-sign-conversion
                         -Wno-shorten-64-to-32)
+    
+    # macOS specific compiler options to handle unused variable warnings
+    if (OS_MACOSX)
+        add_compile_options(-Wno-unused-const-variable
+                           -Wno-unused-variable
+                           -Wno-unused-function)
+        message(STATUS "Added macOS specific compile options to handle unused warnings")
+    endif()
     if (USE_LIBCPP)
         add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
         add_definitions(-DUSE_LIBCPP)

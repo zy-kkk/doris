@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <memory>
 #include <ostream>
+#include <semaphore>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -786,7 +787,7 @@ Status RowIdStorageReader::read_batch_external_row(
                 std::mutex mtx;
 
                 //semaphore: Limit the number of scan tasks submitted at one time
-                std::counting_semaphore semaphore {max_file_scanners};
+                std::counting_semaphore<> semaphore {max_file_scanners};
 
                 size_t idx = 0;
                 for (const auto& [_, scan_info] : scan_rows) {
