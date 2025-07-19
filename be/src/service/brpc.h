@@ -21,6 +21,24 @@
 #undef EINTERNAL
 #endif
 
+// macOS compatibility fixes for BRPC
+#ifdef __APPLE__
+#include <netinet/in.h>
+#include <sys/types.h>
+
+// Define missing INADDR_NONE on macOS
+#ifndef INADDR_NONE
+#define INADDR_NONE ((in_addr_t)-1)
+#endif
+
+// Define missing u_int type on macOS
+#ifndef _U_INT
+#define _U_INT
+typedef unsigned int u_int;
+#endif
+
+#endif // __APPLE__
+
 // all header need by brpc is contain in this file.
 // include this file instead of include <brpc/xxx.h>.
 #include <brpc/channel.h>

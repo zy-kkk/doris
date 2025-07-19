@@ -24,6 +24,18 @@
 #include "runtime_filter/runtime_filter_definitions.h"
 #include "vec/columns/column_dictionary.h"
 
+// C++20 math constants compatibility
+#if __cpp_lib_math_constants >= 201907L
+#include <numbers>
+namespace doris_math_constants {
+    constexpr double ln2 = std::numbers::ln2;
+}
+#else
+namespace doris_math_constants {
+    constexpr double ln2 = 0.6931471805599453;  // ln(2)
+}
+#endif
+
 namespace doris {
 #include "common/compile_check_begin.h"
 // Only Used In RuntimeFilter
@@ -50,7 +62,7 @@ public:
 
             // Handle case where ndv == 1 => ceil(log2(m/8)) < 0.
             int log_filter_size =
-                    std::max(0, (int)(std::ceil(std::log(m / 8) / std::numbers::ln2)));
+                    std::max(0, (int)(std::ceil(std::log(m / 8) / doris_math_constants::ln2)));
             auto be_calculate_size = (((int64_t)1) << log_filter_size);
             // if FE do use ndv stat to predict the bf size, BE only use the row count. FE have more
             // exactly row count stat. which one is min is more correctly.

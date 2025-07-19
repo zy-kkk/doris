@@ -61,7 +61,7 @@ CELLARS=(
     wget
     pcre
     maven
-    llvm@16
+    llvm
     m4
 )
 for cellar in "\${CELLARS[@]}"; do

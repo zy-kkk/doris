@@ -37,6 +37,40 @@
 #include <utility>
 #include <vector>
 
+// C++20 semaphore compatibility
+#if __cpp_lib_semaphore >= 201907L
+#include <semaphore>
+namespace doris_sync {
+    using counting_semaphore = std::counting_semaphore<>;
+}
+#else
+#include <condition_variable>
+#include <mutex>
+namespace doris_sync {
+    class counting_semaphore {
+    public:
+        explicit counting_semaphore(int count) : count_(count) {}
+        
+        void acquire() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return count_ > 0; });
+            --count_;
+        }
+        
+        void release() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++count_;
+            cv_.notify_one();
+        }
+        
+    private:
+        int count_;
+        std::mutex mutex_;
+        std::condition_variable cv_;
+    };
+}
+#endif
+
 #include "bthread/countdown_event.h"
 #include "cloud/cloud_storage_engine.h"
 #include "cloud/cloud_tablet.h"
@@ -788,7 +822,7 @@ Status RowIdStorageReader::read_batch_external_row(
                 std::mutex mtx;
 
                 //semaphore: Limit the number of scan tasks submitted at one time
-                std::counting_semaphore semaphore {max_file_scanners};
+                doris_sync::counting_semaphore semaphore {max_file_scanners};
 
                 size_t idx = 0;
                 for (const auto& [_, scan_info] : scan_rows) {
