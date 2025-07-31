@@ -450,4 +450,9 @@ public class JdbcExternalCatalog extends ExternalCatalog {
     public IdentifierMapping getIdentifierMapping() {
         return identifierMapping;
     }
+
+    public JdbcClient getJdbcClient() {
+        makeSureInitialized();
+        return jdbcClient;
+    }
 }

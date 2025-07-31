@@ -21,9 +21,17 @@ import org.apache.doris.analysis.StatementBase;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.JdbcResource;
 import org.apache.doris.catalog.JdbcTable;
+import org.apache.doris.catalog.PartitionItem;
+import org.apache.doris.catalog.PartitionType;
+import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.datasource.ExternalDatabase;
 import org.apache.doris.datasource.ExternalTable;
 import org.apache.doris.datasource.SchemaCacheValue;
+import org.apache.doris.datasource.mvcc.MvccSnapshot;
+import org.apache.doris.mtmv.MTMVRefreshContext;
+import org.apache.doris.mtmv.MTMVRelatedTableIf;
+import org.apache.doris.mtmv.MTMVSnapshotIf;
 import org.apache.doris.qe.AutoCloseConnectContext;
 import org.apache.doris.qe.StmtExecutor;
 import org.apache.doris.statistics.AnalysisInfo;
@@ -43,12 +51,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * Jdbc external table.
  */
-public class JdbcExternalTable extends ExternalTable {
+public class JdbcExternalTable extends ExternalTable implements MTMVRelatedTableIf {
     private static final Logger LOG = LogManager.getLogger(JdbcExternalTable.class);
 
     public static final String MYSQL_ROW_COUNT_SQL = "SELECT max(row_count) as `rows` FROM ("
@@ -74,6 +83,7 @@ public class JdbcExternalTable extends ExternalTable {
             + "(\"catalog\"=\"${ctlName}\", \"query\"=\"${sql}\");";
 
     private JdbcTable jdbcTable;
+    private JdbcDlaTable jdbcDlaTable;
 
     /**
      * Create jdbc external table.
@@ -94,6 +104,12 @@ public class JdbcExternalTable extends ExternalTable {
         super.makeSureInitialized();
         if (!objectCreated) {
             jdbcTable = toJdbcTable();
+            // Initialize DLA table based on database type
+            if (((JdbcExternalCatalog) catalog).getDatabaseTypeName().contains(JdbcResource.MYSQL)) {
+                jdbcDlaTable = new MySQLDlaTable(this);
+            } else {
+                jdbcDlaTable = new GenericJdbcDlaTable(this);
+            }
             objectCreated = true;
         }
     }
@@ -259,5 +275,76 @@ public class JdbcExternalTable extends ExternalTable {
                     catalog.getName(), dbName, name, e.getMessage());
             return UNKNOWN_ROW_COUNT;
         }
+    }
+
+    // ========== MTMVRelatedTableIf Implementation ==========
+
+    @Override
+    public Map<String, PartitionItem> getAndCopyPartitionItems(Optional<MvccSnapshot> snapshot)
+            throws AnalysisException {
+        makeSureInitialized();
+        return jdbcDlaTable.getAndCopyPartitionItems(snapshot);
+    }
+
+    @Override
+    public PartitionType getPartitionType(Optional<MvccSnapshot> snapshot) {
+        makeSureInitialized();
+        return jdbcDlaTable.getPartitionType(snapshot);
+    }
+
+    @Override
+    public Set<String> getPartitionColumnNames(Optional<MvccSnapshot> snapshot) throws DdlException {
+        makeSureInitialized();
+        return jdbcDlaTable.getPartitionColumnNames(snapshot);
+    }
+
+    @Override
+    public List<Column> getPartitionColumns(Optional<MvccSnapshot> snapshot) {
+        makeSureInitialized();
+        return jdbcDlaTable.getPartitionColumns(snapshot);
+    }
+
+    @Override
+    public MTMVSnapshotIf getPartitionSnapshot(String partitionName, MTMVRefreshContext context,
+            Optional<MvccSnapshot> snapshot) throws AnalysisException {
+        makeSureInitialized();
+        return jdbcDlaTable.getPartitionSnapshot(partitionName, context, snapshot);
+    }
+
+    @Override
+    public MTMVSnapshotIf getTableSnapshot(MTMVRefreshContext context, Optional<MvccSnapshot> snapshot)
+            throws AnalysisException {
+        makeSureInitialized();
+        return jdbcDlaTable.getTableSnapshot(context, snapshot);
+    }
+
+    @Override
+    public MTMVSnapshotIf getTableSnapshot(Optional<MvccSnapshot> snapshot) throws AnalysisException {
+        makeSureInitialized();
+        return jdbcDlaTable.getTableSnapshot(snapshot);
+    }
+
+    @Override
+    public long getNewestUpdateVersionOrTime() {
+        makeSureInitialized();
+        return jdbcDlaTable.getNewestUpdateVersionOrTime();
+    }
+
+    @Override
+    public boolean needAutoRefresh() {
+        makeSureInitialized();
+        return jdbcDlaTable.needAutoRefresh();
+    }
+
+    @Override
+    public boolean isPartitionColumnAllowNull() {
+        makeSureInitialized();
+        return jdbcDlaTable.isPartitionColumnAllowNull();
+    }
+
+    @Override
+    public boolean isValidRelatedTable() {
+        makeSureInitialized();
+        return jdbcDlaTable.isValidRelatedTable();
     }
 }
