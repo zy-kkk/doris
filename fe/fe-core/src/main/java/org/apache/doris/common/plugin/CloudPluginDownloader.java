@@ -363,7 +363,7 @@ public class CloudPluginDownloader implements AutoCloseable {
     private String buildCloudPath(PluginType pluginType, String pluginName) {
         String instanceId = ((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId();
         if (Strings.isNullOrEmpty(instanceId)) {
-            instanceId = Config.cloud_unique_id;
+            instanceId = String.valueOf(Config.cluster_id);
         }
 
         String path = instanceId + "/plugins/" + pluginType.getDirectoryName();
