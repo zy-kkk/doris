@@ -27,10 +27,12 @@
 #include <utility>
 
 #include "absl/strings/substitute.h"
+#include "cloud/config.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "exec/table_connector.h"
 #include "jni.h"
+#include "runtime/cloud_plugin_downloader.h"
 #include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
 #include "runtime/types.h"
@@ -126,7 +128,8 @@ Status JdbcConnector::open(RuntimeState* state, bool read) {
     // Add a scoped cleanup jni reference object. This cleans up local refs made below.
     JniLocalFrame jni_frame;
     {
-        std::string driver_path = _get_real_url(_conn_param.driver_path);
+        std::string driver_path =
+                _get_real_url(_conn_param.driver_path, _conn_param.driver_checksum);
 
         TJdbcExecutorCtorParams ctor_params;
         ctor_params.__set_statement(_sql_str);
@@ -635,25 +638,50 @@ Status JdbcConnector::_get_java_table_type(JNIEnv* env, TOdbcTableType::type tab
     return Status::OK();
 }
 
-std::string JdbcConnector::_get_real_url(const std::string& url) {
+std::string JdbcConnector::_get_real_url(const std::string& url, const std::string& expected_md5) {
     if (url.find(":/") == std::string::npos) {
-        return _check_and_return_default_driver_url(url);
+        return _check_and_return_default_driver_url(url, expected_md5);
     }
     return url;
 }
 
-std::string JdbcConnector::_check_and_return_default_driver_url(const std::string& url) {
+std::string JdbcConnector::_check_and_return_default_driver_url(const std::string& url,
+                                                                const std::string& expected_md5) {
     const char* doris_home = std::getenv("DORIS_HOME");
-
     std::string default_url = std::string(doris_home) + "/plugins/jdbc_drivers";
     std::string default_old_url = std::string(doris_home) + "/jdbc_drivers";
-
     if (config::jdbc_drivers_dir == default_url) {
         // If true, which means user does not set `jdbc_drivers_dir` and use the default one.
         // Because in 2.1.8, we change the default value of `jdbc_drivers_dir`
         // from `DORIS_HOME/jdbc_drivers` to `DORIS_HOME/plugins/jdbc_drivers`,
         // so we need to check the old default dir for compatibility.
         std::filesystem::path file = default_url + "/" + url;
+
+        // In cloud mode, always try cloud download first (prioritize cloud mode)
+        if (config::is_cloud_mode()) {
+            try {
+                std::string target_path = default_url + "/" + url;
+                std::string downloaded_path = CloudPluginDownloader::download_from_cloud(
+                        CloudPluginDownloader::PluginType::JDBC_DRIVERS, url, target_path,
+                        expected_md5);
+                if (!downloaded_path.empty()) {
+                    LOG(INFO) << "Successfully downloaded JDBC driver from cloud: " << url << " to "
+                              << downloaded_path;
+                    return "file://" + downloaded_path;
+                }
+            } catch (const std::exception& e) {
+                // If user provided MD5, this should be a hard error
+                if (!expected_md5.empty()) {
+                    LOG(ERROR) << "Failed to download JDBC driver with user-provided MD5: "
+                               << e.what();
+                    throw;
+                } else {
+                    LOG(WARNING) << "Failed to download JDBC driver from cloud: " << e.what()
+                                 << ", falling back to local file check";
+                }
+            }
+        }
+
         if (std::filesystem::exists(file)) {
             return "file://" + default_url + "/" + url;
         } else {

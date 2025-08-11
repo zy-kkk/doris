@@ -43,6 +43,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.plugin.CloudPluginDownloader;
 import org.apache.doris.common.util.URI;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
@@ -159,6 +160,7 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
     private TFunctionBinaryType binaryType = TFunctionBinaryType.JAVA_UDF;
     // needed item set after analyzed
     private String userFile;
+    private String originalUserFile; // Keep original jar name for BE
     private Function function;
     private String checksum = "";
     private boolean isStaticLoad = false;
@@ -304,6 +306,11 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
 
         userFile = properties.getOrDefault(FILE_KEY, properties.get(OBJECT_FILE_KEY));
+        originalUserFile = userFile; // Keep original jar name for BE
+        // Convert userFile to realUrl only for FE checksum calculation
+        if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
+            userFile = getRealUrl(userFile);
+        }
         if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
             try {
                 computeObjectChecksum();
@@ -377,6 +384,33 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
     }
 
+    private String getRealUrl(String url) {
+        if (url.indexOf(":/") == -1) {
+            return checkAndReturnDefaultJavaUdfUrl(url);
+        }
+        return url;
+    }
+
+    private String checkAndReturnDefaultJavaUdfUrl(String url) {
+        String dorisHome = System.getenv("DORIS_HOME");
+        String defaultUrl = dorisHome + "/plugins/java_udf";
+        // In cloud mode, try cloud download first
+        if (Config.isCloudMode()) {
+            try {
+                String targetPath = defaultUrl + "/" + url;
+                String downloadedPath = CloudPluginDownloader.downloadFromCloud(
+                        CloudPluginDownloader.PluginType.JAVA_UDF, url, targetPath, null);
+                if (!downloadedPath.isEmpty()) {
+                    return "file://" + downloadedPath;
+                }
+            } catch (Exception e) {
+                // Fall back to local file check
+            }
+        }
+        // Return the file path (original UDF behavior)
+        return "file://" + defaultUrl + "/" + url;
+    }
+
     private void analyzeUdtf() throws AnalysisException {
         String symbol = properties.get(SYMBOL_KEY);
         if (Strings.isNullOrEmpty(symbol)) {
@@ -387,8 +421,8 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
         analyzeJavaUdf(symbol);
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }
@@ -407,8 +441,8 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         AggregateFunction.AggregateFunctionBuilder builder = AggregateFunction.AggregateFunctionBuilder
                 .createUdfBuilder();
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }
@@ -486,8 +520,8 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
             analyzeJavaUdf(symbol);
         }
         URI location;
-        if (!Strings.isNullOrEmpty(userFile)) {
-            location = URI.create(userFile);
+        if (!Strings.isNullOrEmpty(originalUserFile)) {
+            location = URI.create(originalUserFile);
         } else {
             location = null;
         }

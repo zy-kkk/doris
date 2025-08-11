@@ -55,8 +55,8 @@ Status JavaFunctionCall::open(FunctionContext* context, FunctionContext::Functio
             auto function_cache = UserFunctionCache::instance();
             TJavaUdfExecutorCtorParams ctor_params;
             ctor_params.__set_fn(fn_);
-            // get jar path if both file path location and checksum are null
-            if (!fn_.hdfs_location.empty() && !fn_.checksum.empty()) {
+            // get jar path if file path location is provided
+            if (!fn_.hdfs_location.empty()) {
                 RETURN_IF_ERROR(function_cache->get_jarpath(fn_.id, fn_.hdfs_location, fn_.checksum,
                                                             &local_location));
                 ctor_params.__set_location(local_location);

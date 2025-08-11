@@ -26,18 +26,21 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <ostream>
 #include <regex>
 #include <utility>
 #include <vector>
 
+#include "cloud/config.h"
 #include "common/config.h"
 #include "common/factory_creator.h"
 #include "common/status.h"
 #include "http/http_client.h"
 #include "io/fs/file_system.h"
 #include "io/fs/local_file_system.h"
+#include "runtime/cloud_plugin_downloader.h"
 #include "runtime/exec_env.h"
 #include "util/dynamic_util.h"
 #include "util/md5.h"
@@ -353,7 +356,9 @@ std::string UserFunctionCache::_make_lib_file(int64_t function_id, const std::st
 Status UserFunctionCache::get_jarpath(int64_t fid, const std::string& url,
                                       const std::string& checksum, std::string* libpath) {
     std::shared_ptr<UserFunctionCacheEntry> entry = nullptr;
-    RETURN_IF_ERROR(_get_cache_entry(fid, url, checksum, entry, LibType::JAR));
+    // Process URL to handle local file paths and cloud download
+    std::string real_url = _get_real_url(url, checksum);
+    RETURN_IF_ERROR(_get_cache_entry(fid, real_url, checksum, entry, LibType::JAR));
     *libpath = entry->lib_file;
     return Status::OK();
 }
@@ -381,4 +386,40 @@ std::vector<std::string> UserFunctionCache::_split_string_by_checksum(const std:
 
     return result;
 }
+
+std::string UserFunctionCache::_get_real_url(const std::string& url, const std::string& checksum) {
+    if (url.find(":/") == std::string::npos) {
+        return _check_and_return_default_java_udf_url(url, checksum);
+    }
+    return url;
+}
+
+std::string UserFunctionCache::_check_and_return_default_java_udf_url(const std::string& url,
+                                                                      const std::string& checksum) {
+    const char* doris_home = std::getenv("DORIS_HOME");
+    std::string default_url = std::string(doris_home) + "/plugins/java_udf";
+
+    std::filesystem::path file = default_url + "/" + url;
+
+    // In cloud mode, always try cloud download first (prioritize cloud mode)
+    if (config::is_cloud_mode()) {
+        try {
+            std::string target_path = default_url + "/" + url;
+            std::string downloaded_path = CloudPluginDownloader::download_from_cloud(
+                    CloudPluginDownloader::PluginType::JAVA_UDF, url, target_path, checksum);
+            if (!downloaded_path.empty()) {
+                LOG(INFO) << "Successfully downloaded Java UDF from cloud: " << url << " to "
+                          << downloaded_path;
+                return "file://" + downloaded_path;
+            }
+        } catch (const std::exception& e) {
+            LOG(WARNING) << "Failed to download Java UDF from cloud: " << e.what()
+                         << ", falling back to local file check";
+        }
+    }
+
+    // Return the file path regardless of whether it exists (original UDF behavior)
+    return "file://" + default_url + "/" + url;
+}
+
 } // namespace doris
