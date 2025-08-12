@@ -312,12 +312,14 @@ public class JdbcExternalCatalog extends ExternalCatalog {
         super.checkWhenCreating();
         Map<String, String> properties = catalogProperty.getProperties();
         if (properties.containsKey(JdbcResource.DRIVER_URL)) {
-            String computedChecksum = JdbcResource.computeObjectChecksum(properties.get(JdbcResource.DRIVER_URL));
+            // Get expected checksum for cloud download if available
+            String expectedChecksum = properties.get(JdbcResource.CHECK_SUM);
+            String computedChecksum = JdbcResource.computeObjectChecksum(
+                    properties.get(JdbcResource.DRIVER_URL), expectedChecksum);
             if (properties.containsKey(JdbcResource.CHECK_SUM)) {
-                String providedChecksum = properties.get(JdbcResource.CHECK_SUM);
-                if (!providedChecksum.equals(computedChecksum)) {
+                if (!expectedChecksum.equals(computedChecksum)) {
                     throw new DdlException(
-                            "The provided checksum (" + providedChecksum
+                            "The provided checksum (" + expectedChecksum
                                     + ") does not match the computed checksum (" + computedChecksum
                                     + ") for the driver_url."
                     );
@@ -441,8 +443,7 @@ public class JdbcExternalCatalog extends ExternalCatalog {
         JdbcTable testTable = new JdbcTable(0, "test_jdbc_connection", Lists.newArrayList(),
                 TableType.JDBC_EXTERNAL_TABLE);
         setCommonJdbcTableProperties(testTable, "test_jdbc_connection", testClient);
-        // Special checksum computation
-        testTable.setCheckSum(JdbcResource.computeObjectChecksum(this.getDriverUrl()));
+        testTable.setCheckSum(JdbcResource.computeObjectChecksum(this.getDriverUrl(), null));
 
         return testTable;
     }

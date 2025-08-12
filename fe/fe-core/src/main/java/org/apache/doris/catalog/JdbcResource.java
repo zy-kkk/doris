@@ -23,6 +23,8 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.EnvUtils;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.plugin.CloudPluginDownloader;
+import org.apache.doris.common.plugin.CloudPluginDownloader.PluginType;
 import org.apache.doris.common.proc.BaseProcResult;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalCatalog;
@@ -253,11 +255,15 @@ public class JdbcResource extends Resource {
     }
 
     public static String computeObjectChecksum(String driverPath) throws DdlException {
+        return computeObjectChecksum(driverPath, null);
+    }
+
+    public static String computeObjectChecksum(String driverPath, String expectedMd5) throws DdlException {
         if (FeConstants.runningUnitTest) {
             // skip checking checksum when running ut
             return "";
         }
-        String fullDriverUrl = getFullDriverUrl(driverPath);
+        String fullDriverUrl = getFullDriverUrl(driverPath, expectedMd5);
 
         try (InputStream inputStream =
                 Util.getInputStreamFromUrl(fullDriverUrl, null, HTTP_TIMEOUT_MS, HTTP_TIMEOUT_MS)) {
@@ -292,6 +298,10 @@ public class JdbcResource extends Resource {
     }
 
     public static String getFullDriverUrl(String driverUrl) throws IllegalArgumentException {
+        return getFullDriverUrl(driverUrl, null);
+    }
+
+    public static String getFullDriverUrl(String driverUrl, String expectedMd5) throws IllegalArgumentException {
         if (!(driverUrl.startsWith("file://") || driverUrl.startsWith("http://")
                 || driverUrl.startsWith("https://") || driverUrl.matches("^[^:/]+\\.jar$"))) {
             throw new IllegalArgumentException("Invalid driver URL format. Supported formats are: "
@@ -303,7 +313,7 @@ public class JdbcResource extends Resource {
             String schema = uri.getScheme();
             checkCloudWhiteList(driverUrl);
             if (schema == null && !driverUrl.startsWith("/")) {
-                return checkAndReturnDefaultDriverUrl(driverUrl);
+                return checkAndReturnDefaultDriverUrl(driverUrl, expectedMd5);
             }
 
             if ("*".equals(Config.jdbc_driver_secure_path)) {
@@ -322,7 +332,7 @@ public class JdbcResource extends Resource {
         }
     }
 
-    private static String checkAndReturnDefaultDriverUrl(String driverUrl) {
+    private static String checkAndReturnDefaultDriverUrl(String driverUrl, String expectedMd5) {
         final String defaultDriverUrl = EnvUtils.getDorisHome() + "/plugins/jdbc_drivers";
         final String defaultOldDriverUrl = EnvUtils.getDorisHome() + "/jdbc_drivers";
         if (Config.jdbc_drivers_dir.equals(defaultDriverUrl)) {
@@ -330,6 +340,25 @@ public class JdbcResource extends Resource {
             // Because in new version, we change the default value of `jdbc_drivers_dir`
             // from `DORIS_HOME/jdbc_drivers` to `DORIS_HOME/plugins/jdbc_drivers`,
             // so we need to check the old default dir for compatibility.
+            // In cloud mode, always try cloud download first for validation and updates
+            if (Config.isCloudMode()) {
+                try {
+                    String downloadedPath = CloudPluginDownloader.downloadFromCloud(
+                            PluginType.JDBC_DRIVERS,
+                            driverUrl,
+                            defaultDriverUrl + "/" + driverUrl,
+                            expectedMd5);
+                    if (!downloadedPath.isEmpty()) {
+                        return "file://" + downloadedPath;
+                    }
+                } catch (Exception e) {
+                    LOG.warn("Failed to download JDBC driver from cloud: {}, error: {}", driverUrl, e.getMessage());
+                    throw new RuntimeException("Can't download JDBC driver from cloud: " + driverUrl
+                            + ". Please retry later or check your driver has been uploaded to cloud.");
+                }
+            }
+
+            // Check local file existence (for non-cloud mode or cloud download failed)
             File file = new File(defaultDriverUrl + "/" + driverUrl);
             if (file.exists()) {
                 return "file://" + defaultDriverUrl + "/" + driverUrl;
