@@ -27,11 +27,13 @@
 #include <utility>
 
 #include "absl/strings/substitute.h"
+#include "cloud/config.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "exec/table_connector.h"
 #include "jni.h"
 #include "runtime/descriptors.h"
+#include "runtime/plugin/cloud_plugin_downloader.h"
 #include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "runtime/user_function_cache.h"
@@ -126,7 +128,12 @@ Status JdbcConnector::open(RuntimeState* state, bool read) {
     // Add a scoped cleanup jni reference object. This cleans up local refs made below.
     JniLocalFrame jni_frame;
     {
-        std::string driver_path = _get_real_url(_conn_param.driver_path);
+        std::string driver_path;
+        Status url_status =
+                _get_real_url(_conn_param.driver_path, _conn_param.driver_checksum, &driver_path);
+        if (!url_status.ok()) {
+            return url_status;
+        }
 
         TJdbcExecutorCtorParams ctor_params;
         ctor_params.__set_statement(_sql_str);
@@ -635,33 +642,55 @@ Status JdbcConnector::_get_java_table_type(JNIEnv* env, TOdbcTableType::type tab
     return Status::OK();
 }
 
-std::string JdbcConnector::_get_real_url(const std::string& url) {
+Status JdbcConnector::_get_real_url(const std::string& url, const std::string& expected_md5,
+                                    std::string* result_url) {
     if (url.find(":/") == std::string::npos) {
-        return _check_and_return_default_driver_url(url);
+        return _check_and_return_default_driver_url(url, expected_md5, result_url);
     }
-    return url;
+    *result_url = url;
+    return Status::OK();
 }
 
-std::string JdbcConnector::_check_and_return_default_driver_url(const std::string& url) {
+Status JdbcConnector::_check_and_return_default_driver_url(const std::string& url,
+                                                           const std::string& expected_md5,
+                                                           std::string* result_url) {
     const char* doris_home = std::getenv("DORIS_HOME");
-
     std::string default_url = std::string(doris_home) + "/plugins/jdbc_drivers";
     std::string default_old_url = std::string(doris_home) + "/jdbc_drivers";
-
     if (config::jdbc_drivers_dir == default_url) {
         // If true, which means user does not set `jdbc_drivers_dir` and use the default one.
         // Because in 2.1.8, we change the default value of `jdbc_drivers_dir`
         // from `DORIS_HOME/jdbc_drivers` to `DORIS_HOME/plugins/jdbc_drivers`,
         // so we need to check the old default dir for compatibility.
         std::filesystem::path file = default_url + "/" + url;
+
+        if (config::is_cloud_mode()) {
+            std::string target_path = default_url + "/" + url;
+            std::string downloaded_path;
+            Status status = CloudPluginDownloader::download_from_cloud(
+                    CloudPluginDownloader::PluginType::JDBC_DRIVERS, url, target_path,
+                    &downloaded_path, expected_md5);
+            if (status.ok() && !downloaded_path.empty()) {
+                *result_url = "file://" + downloaded_path;
+                return Status::OK();
+            } else {
+                LOG(WARNING) << "Failed to download JDBC driver from cloud: " << status.to_string();
+                return Status::RuntimeError(
+                        "Can't download JDBC driver from cloud: {}. "
+                        "Please retry later or check your driver has been uploaded to cloud.",
+                        url);
+            }
+        }
+
         if (std::filesystem::exists(file)) {
-            return "file://" + default_url + "/" + url;
+            *result_url = "file://" + default_url + "/" + url;
         } else {
-            return "file://" + default_old_url + "/" + url;
+            *result_url = "file://" + default_old_url + "/" + url;
         }
     } else {
-        return "file://" + config::jdbc_drivers_dir + "/" + url;
+        *result_url = "file://" + config::jdbc_drivers_dir + "/" + url;
     }
+    return Status::OK();
 }
 
 } // namespace doris::vectorized
