@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "common/status.h"
@@ -61,30 +63,28 @@ public:
                          std::string* local_path, const std::string& expected_md5 = "");
 
 private:
-    static constexpr int MAX_RETRY_ATTEMPTS = 3;
-    static constexpr int RETRY_DELAY_MS = 1000;
+    S3Config _config;
+    std::shared_ptr<io::S3FileSystem> _s3_fs;
 
-    S3Config config_;
-    std::shared_ptr<io::S3FileSystem> s3_fs_;
+    // Static shard locks for file-level synchronization (inspired by TxnManager)
+    static constexpr size_t LOCK_SHARD_SIZE = 32;
+    static std::array<std::mutex, LOCK_SHARD_SIZE> _file_locks;
+
+    // Get lock for specific file path using hash-based sharding
+    static std::mutex& _get_lock_for_path(const std::string& file_path);
 
     // Execute single file download with retry logic
-    Status execute_download(const std::string& remote_s3_path, const std::string& local_path,
-                            const std::string& expected_md5);
-
-    // Sleep for retry with exponential backoff
-    void sleep_for_retry(int attempt);
+    Status _execute_download(const std::string& remote_s3_path, const std::string& local_path,
+                             const std::string& expected_md5);
 
     // Update cache after download
-    void update_cache_after_download(const std::string& local_path, const std::string& actual_md5);
+    void _update_cache_after_download(const std::string& local_path, const std::string& actual_md5);
 
     // Calculate file MD5
-    std::string calculate_file_md5(const std::string& file_path);
+    std::string _calculate_file_md5(const std::string& file_path);
 
     // Create S3 file system
-    std::shared_ptr<io::S3FileSystem> create_s3_filesystem(const S3Config& config);
-
-    // Create parent directory
-    Status create_parent_directory(const std::string& file_path);
+    std::shared_ptr<io::S3FileSystem> _create_s3_filesystem(const S3Config& config);
 };
 
 } // namespace doris

@@ -353,7 +353,7 @@ public class JdbcResource extends Resource {
                     }
                 } catch (Exception e) {
                     LOG.warn("Failed to download JDBC driver from cloud: {}, error: {}", driverUrl, e.getMessage());
-                    throw new RuntimeException("Can't download JDBC driver from cloud: " + driverUrl
+                    throw new RuntimeException("Cannot download JDBC driver from cloud: " + driverUrl
                             + ". Please retry later or check your driver has been uploaded to cloud.");
                 }
             }

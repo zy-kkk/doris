@@ -19,10 +19,9 @@
 
 #include <fmt/format.h>
 
-#include "cloud/config.h"
-#include "common/logging.h"
 #include "common/status.h"
 #include "runtime/plugin/cloud_plugin_config_provider.h"
+#include "runtime/plugin/plugin_file_cache.h"
 
 namespace doris {
 
@@ -34,7 +33,13 @@ Status CloudPluginDownloader::download_from_cloud(PluginType plugin_type,
     // Check supported plugin types first
     if (plugin_type != PluginType::JDBC_DRIVERS && plugin_type != PluginType::JAVA_UDF) {
         return Status::InvalidArgument("Unsupported plugin type for cloud download: {}",
-                                       plugin_type_to_string(plugin_type));
+                                       _plugin_type_to_string(plugin_type));
+    }
+
+    // Check if the file already exists and is valid
+    if (PluginFileCache::is_file_valid(local_target_path, expected_md5)) {
+        *local_path = local_target_path;
+        return Status::OK(); // Local file is valid, return directly
     }
 
     if (plugin_name.empty()) {
@@ -42,35 +47,24 @@ Status CloudPluginDownloader::download_from_cloud(PluginType plugin_type,
     }
 
     // 1. Get cloud configuration and build S3 path
-    auto s3_config = CloudPluginConfigProvider::get_cloud_s3_config();
-    if (!s3_config) {
-        return Status::InternalError("Failed to get cloud S3 configuration");
-    }
+    std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
+    Status status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
+    RETURN_IF_ERROR(status);
 
-    std::string instance_id = CloudPluginConfigProvider::get_cloud_instance_id();
-    if (instance_id.empty()) {
-        return Status::InternalError("Failed to get cloud instance ID");
-    }
+    std::string instance_id;
+    status = CloudPluginConfigProvider::get_cloud_instance_id(&instance_id);
+    RETURN_IF_ERROR(status);
 
     // 2. Direct path construction
     std::string s3_path = fmt::format("s3://{}/{}/plugins/{}/{}", s3_config->bucket, instance_id,
-                                      plugin_type_to_string(plugin_type), plugin_name);
+                                      _plugin_type_to_string(plugin_type), plugin_name);
 
     // 3. Execute download
     S3PluginDownloader downloader(*s3_config);
     return downloader.download_file(s3_path, local_target_path, local_path, expected_md5);
 }
 
-Status CloudPluginDownloader::download_from_s3(const S3PluginDownloader::S3Config& s3_config,
-                                               const std::string& remote_s3_path,
-                                               const std::string& local_target_path,
-                                               std::string* local_path,
-                                               const std::string& expected_md5) {
-    S3PluginDownloader downloader(s3_config);
-    return downloader.download_file(remote_s3_path, local_target_path, local_path, expected_md5);
-}
-
-std::string CloudPluginDownloader::plugin_type_to_string(PluginType plugin_type) {
+std::string CloudPluginDownloader::_plugin_type_to_string(PluginType plugin_type) {
     switch (plugin_type) {
     case PluginType::JDBC_DRIVERS:
         return "jdbc_drivers";

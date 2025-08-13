@@ -71,6 +71,11 @@ public class CloudPluginDownloader {
             throw new RuntimeException("Unsupported plugin type for cloud download: " + pluginType);
         }
 
+        // Check if the file already exists and is valid
+        if (PluginFileCache.isFileValid(localTargetPath, expectedMd5)) {
+            return localTargetPath; // If valid, return directly
+        }
+
         if (Strings.isNullOrEmpty(pluginName)) {
             throw new RuntimeException("pluginName cannot be null or empty");
         }

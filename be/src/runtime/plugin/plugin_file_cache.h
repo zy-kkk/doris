@@ -17,25 +17,25 @@
 
 #pragma once
 
-#include <chrono>
+#include <mutex>
 #include <string>
-#include <unordered_map>
 
-#include "common/status.h"
+#include "util/lru_cache.hpp"
 
 namespace doris {
 
 /**
- * PluginFileCache - Simple static memory cache for plugin file validation.
+ * PluginFileCache - LRU-based cache for plugin file validation (max 100 entries).
  */
 class PluginFileCache {
 public:
-    // Simple file info for caching
+    // File info for caching
     struct FileInfo {
         std::string local_md5; // MD5 hash of the file for quick validation
         long file_size = 0;    // File size
 
         FileInfo() = default;
+        FileInfo(const std::string& md5, long size) : local_md5(md5), file_size(size) {}
     };
 
     // Check if local file is valid
@@ -45,17 +45,10 @@ public:
     static void update_cache(const std::string& local_path, const std::string& local_md5,
                              long file_size);
 
-    // Clear cache entry
-    static void clear_cache(const std::string& local_path);
-
-    // Clear all cache
-    static void clear_all_cache();
-
 private:
-    // Static cache: local_path -> FileInfo
-    static std::unordered_map<std::string, FileInfo> _cache;
-
-    // Mutex for thread safety
+    // LRU cache with max 100 entries
+    static constexpr size_t MAX_CACHE_SIZE = 100;
+    static LruCache<std::string, FileInfo> _cache;
     static std::mutex _cache_mutex;
 };
 

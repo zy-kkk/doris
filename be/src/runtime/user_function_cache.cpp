@@ -420,7 +420,7 @@ Status UserFunctionCache::_check_and_return_default_java_udf_url(const std::stri
         } else {
             LOG(WARNING) << "Failed to download Java UDF from cloud: " << status.to_string();
             return Status::RuntimeError(
-                    "Can't download Java UDF from cloud: {}. "
+                    "Cannot download Java UDF from cloud: {}. "
                     "Please retry later or check your UDF has been uploaded to cloud.",
                     url);
         }

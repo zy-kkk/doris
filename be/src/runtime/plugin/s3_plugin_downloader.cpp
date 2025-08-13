@@ -20,7 +20,6 @@
 #include <fmt/format.h>
 
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -34,14 +33,16 @@
 
 namespace doris {
 
+// Static member definitions
+std::array<std::mutex, S3PluginDownloader::LOCK_SHARD_SIZE> S3PluginDownloader::_file_locks;
+
 std::string S3PluginDownloader::S3Config::to_string() const {
     return fmt::format("S3Config{{endpoint='{}', region='{}', bucket='{}', access_key='{}'}}",
                        endpoint, region, bucket, access_key.empty() ? "null" : "***");
 }
 
-S3PluginDownloader::S3PluginDownloader(const S3Config& config) : config_(config) {
-    s3_fs_ = create_s3_filesystem(config_);
-    // Note: We don't throw here. The caller should check via download_file return status
+S3PluginDownloader::S3PluginDownloader(const S3Config& config) : _config(config) {
+    _s3_fs = _create_s3_filesystem(_config);
 }
 
 S3PluginDownloader::~S3PluginDownloader() = default;
@@ -50,46 +51,58 @@ Status S3PluginDownloader::download_file(const std::string& remote_s3_path,
                                          const std::string& local_target_path,
                                          std::string* local_path, const std::string& expected_md5) {
     // Check if S3 filesystem is initialized
-    if (!s3_fs_) {
+    if (!_s3_fs) {
         return Status::InternalError("S3 filesystem not initialized");
     }
 
-    // Check if download is needed first
+    // Use file-level locking to prevent concurrent downloads of the same file
+    std::lock_guard file_lock(_get_lock_for_path(local_target_path));
+
+    // Check if download is needed (within lock to ensure consistency)
     if (PluginFileCache::is_file_valid(local_target_path, expected_md5)) {
         *local_path = local_target_path;
         return Status::OK(); // Local file is valid, return directly
     }
 
-    // Execute download retry logic
-    Status last_status;
-    for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; ++attempt) {
-        last_status = execute_download(remote_s3_path, local_target_path, expected_md5);
-        if (last_status.ok()) {
-            *local_path = local_target_path;
-            return Status::OK();
-        }
-        if (attempt < MAX_RETRY_ATTEMPTS) {
-            sleep_for_retry(attempt);
+    // Execute download
+    Status download_status = _execute_download(remote_s3_path, local_target_path, expected_md5);
+
+    if (download_status.ok()) {
+        *local_path = local_target_path;
+        return Status::OK();
+    }
+    return download_status;
+}
+
+Status S3PluginDownloader::_execute_download(const std::string& remote_s3_path,
+                                             const std::string& local_path,
+                                             const std::string& expected_md5) {
+    // Create parent directory using local filesystem
+    std::filesystem::path file_path(local_path);
+    std::filesystem::path parent_dir = file_path.parent_path();
+    if (!parent_dir.empty()) {
+        Status status = io::global_local_filesystem()->create_directory(parent_dir.string());
+        // Ignore error if directory already exists
+        if (!status.ok() && !status.is<ErrorCode::FILE_ALREADY_EXIST>()) {
+            RETURN_IF_ERROR(status);
         }
     }
 
-    // All retries failed
-    return last_status;
-}
-
-Status S3PluginDownloader::execute_download(const std::string& remote_s3_path,
-                                            const std::string& local_path,
-                                            const std::string& expected_md5) {
-    // Create parent directory
-    Status status = create_parent_directory(local_path);
-    RETURN_IF_ERROR(status);
+    // Delete existing file if present (to ensure clean download)
+    if (std::filesystem::exists(local_path)) {
+        std::error_code ec;
+        if (!std::filesystem::remove(local_path, ec)) {
+            return Status::InternalError("Failed to delete existing file: {} ({})", local_path,
+                                         ec.message());
+        }
+    }
 
     // Use S3FileSystem's public download method
-    status = s3_fs_->download(remote_s3_path, local_path);
-    RETURN_IF_ERROR(status);
+    Status download_status = _s3_fs->download(remote_s3_path, local_path);
+    RETURN_IF_ERROR(download_status);
 
     // MD5 verification and cache update
-    std::string actual_md5 = calculate_file_md5(local_path);
+    std::string actual_md5 = _calculate_file_md5(local_path);
 
     // If user provided MD5, must verify consistency
     if (!expected_md5.empty()) {
@@ -101,22 +114,14 @@ Status S3PluginDownloader::execute_download(const std::string& remote_s3_path,
     }
 
     // Update cache
-    update_cache_after_download(local_path, actual_md5);
+    _update_cache_after_download(local_path, actual_md5);
 
     LOG(INFO) << "Successfully downloaded " << remote_s3_path << " to " << local_path;
     return Status::OK();
 }
 
-void S3PluginDownloader::sleep_for_retry(int attempt) {
-    try {
-        std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS * attempt));
-    } catch (const std::exception& e) {
-        throw std::runtime_error("Download interrupted: " + std::string(e.what()));
-    }
-}
-
-void S3PluginDownloader::update_cache_after_download(const std::string& local_path,
-                                                     const std::string& actual_md5) {
+void S3PluginDownloader::_update_cache_after_download(const std::string& local_path,
+                                                      const std::string& actual_md5) {
     try {
         std::filesystem::path file_path(local_path);
         if (!std::filesystem::exists(file_path)) {
@@ -131,21 +136,7 @@ void S3PluginDownloader::update_cache_after_download(const std::string& local_pa
     }
 }
 
-Status S3PluginDownloader::create_parent_directory(const std::string& file_path) {
-    try {
-        std::filesystem::path path(file_path);
-        std::filesystem::path parent_dir = path.parent_path();
-
-        if (!parent_dir.empty() && !std::filesystem::exists(parent_dir)) {
-            std::filesystem::create_directories(parent_dir);
-        }
-        return Status::OK();
-    } catch (const std::exception& e) {
-        return Status::IOError("Failed to create parent directory: {}", e.what());
-    }
-}
-
-std::string S3PluginDownloader::calculate_file_md5(const std::string& file_path) {
+std::string S3PluginDownloader::_calculate_file_md5(const std::string& file_path) {
     std::string md5_result;
     Status status = io::global_local_filesystem()->md5sum(file_path, &md5_result);
     if (!status.ok()) {
@@ -156,7 +147,8 @@ std::string S3PluginDownloader::calculate_file_md5(const std::string& file_path)
     return md5_result;
 }
 
-std::shared_ptr<io::S3FileSystem> S3PluginDownloader::create_s3_filesystem(const S3Config& config) {
+std::shared_ptr<io::S3FileSystem> S3PluginDownloader::_create_s3_filesystem(
+        const S3Config& config) {
     try {
         // Create S3 configuration for S3FileSystem
         S3Conf s3_conf;
@@ -180,6 +172,12 @@ std::shared_ptr<io::S3FileSystem> S3PluginDownloader::create_s3_filesystem(const
         LOG(WARNING) << "Exception creating S3 filesystem: " << e.what();
         return nullptr;
     }
+}
+
+std::mutex& S3PluginDownloader::_get_lock_for_path(const std::string& file_path) {
+    // Use hash-based sharding to distribute locks (similar to TxnManager approach)
+    size_t hash = std::hash<std::string> {}(file_path);
+    return _file_locks[hash % LOCK_SHARD_SIZE];
 }
 
 } // namespace doris

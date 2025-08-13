@@ -676,7 +676,7 @@ Status JdbcConnector::_check_and_return_default_driver_url(const std::string& ur
             } else {
                 LOG(WARNING) << "Failed to download JDBC driver from cloud: " << status.to_string();
                 return Status::RuntimeError(
-                        "Can't download JDBC driver from cloud: {}. "
+                        "Cannot download JDBC driver from cloud: {}. "
                         "Please retry later or check your driver has been uploaded to cloud.",
                         url);
             }

@@ -17,12 +17,13 @@
 
 package org.apache.doris.common.plugin;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.base.Strings;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.File;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * PluginFileCache - Simple static memory cache for plugin file validation.
@@ -34,8 +35,10 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PluginFileCache {
     private static final Logger LOG = LogManager.getLogger(PluginFileCache.class);
 
-    // Cache: localPath -> FileInfo
-    private static final ConcurrentHashMap<String, FileInfo> CACHE = new ConcurrentHashMap<>();
+    // Caffeine LRU cache with max 100 entries
+    private static final Cache<String, FileInfo> CACHE = Caffeine.newBuilder()
+            .maximumSize(100)
+            .build();
 
     /**
      * Simple file info for caching
@@ -63,7 +66,7 @@ public class PluginFileCache {
             }
             // Case: The user provides MD5 -> must validate the MD5 of the local cache
             if (!Strings.isNullOrEmpty(userMd5)) {
-                FileInfo info = CACHE.get(localPath);
+                FileInfo info = CACHE.getIfPresent(localPath);
                 if (info == null || Strings.isNullOrEmpty(info.localMd5)) {
                     // There is no MD5 information in the cache, so you need to download and verify it again
                     return false;

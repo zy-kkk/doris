@@ -306,10 +306,11 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
 
         userFile = properties.getOrDefault(FILE_KEY, properties.get(OBJECT_FILE_KEY));
+        String md5sum = properties.get(MD5_CHECKSUM);
         originalUserFile = userFile; // Keep original jar name for BE
         // Convert userFile to realUrl only for FE checksum calculation
         if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
-            userFile = getRealUrl(userFile);
+            userFile = getRealUrl(userFile, md5sum);
         }
         if (!Strings.isNullOrEmpty(userFile) && binaryType != TFunctionBinaryType.RPC) {
             try {
@@ -317,7 +318,6 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
             } catch (IOException | NoSuchAlgorithmException e) {
                 throw new AnalysisException("cannot to compute object's checksum. err: " + e.getMessage());
             }
-            String md5sum = properties.get(MD5_CHECKSUM);
             if (md5sum != null && !md5sum.equalsIgnoreCase(checksum)) {
                 throw new AnalysisException("library's checksum is not equal with input, checksum=" + checksum);
             }
@@ -384,14 +384,14 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
         }
     }
 
-    private String getRealUrl(String url) {
+    private String getRealUrl(String url, String md5) {
         if (!url.contains(":/")) {
-            return checkAndReturnDefaultJavaUdfUrl(url);
+            return checkAndReturnDefaultJavaUdfUrl(url, md5);
         }
         return url;
     }
 
-    private String checkAndReturnDefaultJavaUdfUrl(String url) {
+    private String checkAndReturnDefaultJavaUdfUrl(String url, String md5) {
         String dorisHome = System.getenv("DORIS_HOME");
         String defaultUrl = dorisHome + "/plugins/java_udf";
         // In cloud mode, try cloud download first
@@ -399,12 +399,12 @@ public class CreateFunctionCommand extends Command implements ForwardWithSync {
             String targetPath = defaultUrl + "/" + url;
             try {
                 String downloadedPath = CloudPluginDownloader.downloadFromCloud(
-                        CloudPluginDownloader.PluginType.JAVA_UDF, url, targetPath, null);
+                        CloudPluginDownloader.PluginType.JAVA_UDF, url, targetPath, md5);
                 if (!downloadedPath.isEmpty()) {
                     return "file://" + downloadedPath;
                 }
             } catch (Exception e) {
-                throw new RuntimeException("Can't download UDF from cloud: " + url
+                throw new RuntimeException("Cannot download UDF from cloud: " + url
                         + ". Please retry later or check your UDF has been uploaded to cloud.");
             }
         }

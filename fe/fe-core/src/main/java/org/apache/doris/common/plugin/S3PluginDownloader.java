@@ -43,8 +43,6 @@ import java.util.Map;
  * 4. Features: Single file download, batch directory download, MD5 verification, retry mechanism
  */
 public class S3PluginDownloader implements AutoCloseable {
-    private static final int MAX_RETRY_ATTEMPTS = 3;
-    private static final long RETRY_DELAY_MS = 1000;
 
     private final S3ObjStorage s3Storage;
 
@@ -93,26 +91,19 @@ public class S3PluginDownloader implements AutoCloseable {
      * @throws RuntimeException if download fails after all retries
      */
     public String downloadFile(String remoteS3Path, String localPath, String expectedMd5) {
-        // Check if you need to download it first
-        if (PluginFileCache.isFileValid(localPath, expectedMd5)) {
-            return localPath; // The local file is valid and returns directly
-        }
-
-        // Execute the download retry logic
-        Exception lastException = null;
-        for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+        // Synchronize on file path to prevent concurrent downloads of the same file
+        synchronized (localPath.intern()) {
+            // Check if download is needed (within lock to ensure consistency)
+            if (PluginFileCache.isFileValid(localPath, expectedMd5)) {
+                return localPath; // The local file is valid and returns directly
+            }
+            // Execute the download
             try {
                 return executeDownload(remoteS3Path, localPath, expectedMd5);
             } catch (Exception e) {
-                lastException = e;
-                if (attempt < MAX_RETRY_ATTEMPTS) {
-                    sleepForRetry(attempt);
-                }
+                throw new RuntimeException("Download failed: " + e.getMessage());
             }
         }
-        // All retries failed
-        throw new RuntimeException("Download failed after " + MAX_RETRY_ATTEMPTS + " attempts: "
-                + lastException.getMessage(), lastException);
     }
 
     private String executeDownload(String remoteS3Path, String localPath, String expectedMd5) throws Exception {
@@ -122,8 +113,15 @@ public class S3PluginDownloader implements AutoCloseable {
             Files.createDirectories(parentDir);
         }
 
-        // Perform the download
+        // Delete existing file if present (to ensure clean download)
         File localFile = new File(localPath);
+        if (localFile.exists()) {
+            if (!localFile.delete()) {
+                throw new RuntimeException("Failed to delete existing file: " + localPath);
+            }
+        }
+
+        // Perform the download
         Status status = s3Storage.getObject(remoteS3Path, localFile);
         if (status != Status.OK) {
             throw new RuntimeException("Download failed: " + status.getErrMsg());
@@ -144,15 +142,6 @@ public class S3PluginDownloader implements AutoCloseable {
         updateCacheAfterDownload(localPath, actualMd5);
 
         return localPath;
-    }
-
-    private void sleepForRetry(int attempt) {
-        try {
-            Thread.sleep(RETRY_DELAY_MS * attempt);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Download interrupted", ie);
-        }
     }
 
     /**

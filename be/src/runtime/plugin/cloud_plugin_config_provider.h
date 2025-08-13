@@ -31,14 +31,14 @@ namespace doris {
 class CloudPluginConfigProvider {
 public:
     // Get S3 configuration from cloud mode
-    static std::unique_ptr<S3PluginDownloader::S3Config> get_cloud_s3_config();
+    static Status get_cloud_s3_config(std::unique_ptr<S3PluginDownloader::S3Config>* s3_config);
 
     // Get cloud instance ID
-    static std::string get_cloud_instance_id();
+    static Status get_cloud_instance_id(std::string* instance_id);
 
 private:
     // Get default storage vault info using CloudMetaMgr
-    static Status get_default_storage_vault_info(S3PluginDownloader::S3Config* s3_config);
+    static Status _get_default_storage_vault_info(S3PluginDownloader::S3Config* s3_config);
 };
 
 } // namespace doris

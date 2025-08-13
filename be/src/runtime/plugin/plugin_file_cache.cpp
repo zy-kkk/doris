@@ -18,16 +18,14 @@
 #include "runtime/plugin/plugin_file_cache.h"
 
 #include <filesystem>
-#include <mutex>
 #include <string>
-#include <unordered_map>
 
 #include "common/logging.h"
 
 namespace doris {
 
 // Static member definitions
-std::unordered_map<std::string, PluginFileCache::FileInfo> PluginFileCache::_cache;
+LruCache<std::string, PluginFileCache::FileInfo> PluginFileCache::_cache {MAX_CACHE_SIZE};
 std::mutex PluginFileCache::_cache_mutex;
 
 bool PluginFileCache::is_file_valid(const std::string& local_path, const std::string& user_md5) {
@@ -39,13 +37,14 @@ bool PluginFileCache::is_file_valid(const std::string& local_path, const std::st
 
         // Case: User provides MD5 -> must validate the MD5 of the local cache
         if (!user_md5.empty()) {
-            std::lock_guard<std::mutex> lock(_cache_mutex);
-            auto it = _cache.find(local_path);
-            if (it == _cache.end() || it->second.local_md5.empty()) {
-                return false; // No MD5 information in cache, need to download and verify again
+            std::lock_guard lock(_cache_mutex);
+            FileInfo cached_info;
+            if (_cache.get(local_path, &cached_info)) {
+                // Found in cache, use cached MD5 for quick verification
+                return user_md5 == cached_info.local_md5;
             }
-            // Use cached MD5 for quick verification
-            return user_md5 == it->second.local_md5;
+            // Not in cache, need to download and verify
+            return false;
         }
 
         // Case: User does not provide MD5 -> Use it directly if you have a file (most efficient)
@@ -63,11 +62,8 @@ void PluginFileCache::update_cache(const std::string& local_path, const std::str
         if (!std::filesystem::exists(local_path)) {
             return;
         }
-        std::lock_guard<std::mutex> lock(_cache_mutex);
-        FileInfo info;
-        info.local_md5 = local_md5;
-        info.file_size = file_size;
-        _cache[local_path] = info;
+        std::lock_guard lock(_cache_mutex);
+        _cache.put(local_path, FileInfo(local_md5, file_size));
     } catch (const std::exception& e) {
         LOG(WARNING) << "Failed to update cache for " << local_path << ": " << e.what();
     }

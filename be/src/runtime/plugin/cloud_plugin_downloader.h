@@ -20,7 +20,6 @@
 #include <string>
 
 #include "common/status.h"
-#include "runtime/plugin/s3_plugin_downloader.h"
 
 namespace doris {
 
@@ -47,15 +46,9 @@ public:
                                       const std::string& local_target_path, std::string* local_path,
                                       const std::string& expected_md5 = "");
 
-    // Download with manually configured S3 parameters
-    static Status download_from_s3(const S3PluginDownloader::S3Config& s3_config,
-                                   const std::string& remote_s3_path,
-                                   const std::string& local_target_path, std::string* local_path,
-                                   const std::string& expected_md5 = "");
-
 private:
     // Convert plugin type to directory name
-    static std::string plugin_type_to_string(PluginType plugin_type);
+    static std::string _plugin_type_to_string(PluginType plugin_type);
 };
 
 } // namespace doris
