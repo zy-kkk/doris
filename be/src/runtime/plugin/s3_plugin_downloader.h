@@ -32,7 +32,7 @@ class S3FileSystem;
 namespace doris {
 
 /**
- * S3PluginDownloader is an independent S3 downloader with MD5 verification and retry.
+ * S3PluginDownloader is an independent S3 downloader with thread-safe operations.
  */
 class S3PluginDownloader {
 public:
@@ -58,7 +58,7 @@ public:
     explicit S3PluginDownloader(const S3Config& config);
     ~S3PluginDownloader();
 
-    // Download single file with MD5 verification and retry
+    // Download single file from S3
     Status download_file(const std::string& remote_s3_path, const std::string& local_target_path,
                          std::string* local_path);
 
@@ -66,7 +66,7 @@ private:
     S3Config _config;
     std::shared_ptr<io::S3FileSystem> _s3_fs;
 
-    // Execute single file download with retry logic
+    // Execute single file download with mutex protection
     Status _execute_download(const std::string& remote_s3_path, const std::string& local_path);
 
     // Create S3 file system

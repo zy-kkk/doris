@@ -35,7 +35,7 @@ import java.util.Map;
  * 1. Single responsibility: Only downloads files from S3, no business logic
  * 2. Complete decoupling: No dependency on cloud mode or Doris-specific configuration
  * 3. Reusable: Supports both cloud mode auto-configuration and manual S3 parameters
- * 4. Features: Single file download, batch directory download, MD5 verification, retry mechanism
+ * 4. Features: Single file download with synchronized operations
  */
 public class S3PluginDownloader implements AutoCloseable {
 
@@ -77,12 +77,12 @@ public class S3PluginDownloader implements AutoCloseable {
     // ======================== Core Download Methods ========================
 
     /**
-     * Download single file (supports MD5 verification and retry)
+     * Download single file from S3
      *
      * @param remoteS3Path complete S3 path like "s3://bucket/path/to/file.jar"
      * @param localPath local target file path
      * @return returns local file path on success
-     * @throws RuntimeException if download fails after all retries
+     * @throws RuntimeException if download fails
      */
     public String downloadFile(String remoteS3Path, String localPath) {
         // Execute the download

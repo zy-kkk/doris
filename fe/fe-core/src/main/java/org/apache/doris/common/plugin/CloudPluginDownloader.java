@@ -55,7 +55,7 @@ public class CloudPluginDownloader {
     }
 
     /**
-     * Download plugin from cloud storage (supports MD5 verification)
+     * Download plugin from cloud storage
      *
      * @param pluginType plugin type
      * @param pluginName plugin name
