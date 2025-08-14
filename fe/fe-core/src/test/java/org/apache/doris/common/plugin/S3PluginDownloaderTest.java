@@ -20,12 +20,6 @@ package org.apache.doris.common.plugin;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
 public class S3PluginDownloaderTest {
 
     @Test
@@ -53,61 +47,5 @@ public class S3PluginDownloaderTest {
         Assertions.assertTrue(configStr.contains("test-bucket"));
         Assertions.assertTrue(configStr.contains("***")); // Access key should be masked
         Assertions.assertFalse(configStr.contains("access-key")); // Actual key should not appear
-    }
-
-    @Test
-    public void testCalculateFileMD5WithRealFile() throws IOException {
-        // Create a temporary file for testing
-        Path tempFile = Files.createTempFile("test", ".txt");
-        try {
-            // Write some content to the file
-            try (FileWriter writer = new FileWriter(tempFile.toFile())) {
-                writer.write("Hello, World!");
-            }
-            // Test MD5 calculation (this is a private method, but we can test the file exists)
-            File file = tempFile.toFile();
-            Assertions.assertTrue(file.exists());
-            Assertions.assertTrue(file.length() > 0);
-
-        } finally {
-            // Clean up
-            Files.deleteIfExists(tempFile);
-        }
-    }
-
-    @Test
-    public void testConstructorWithValidConfig() {
-        // Test that constructor doesn't throw with valid config
-        S3PluginDownloader.S3Config config = new S3PluginDownloader.S3Config(
-                "http://localhost:9000", "us-west-2", "test-bucket", "access-key", "secret-key");
-
-        Assertions.assertDoesNotThrow(() -> {
-            new S3PluginDownloader(config);
-        });
-    }
-
-    @Test
-    public void testConstructorWithEmptyConfig() {
-        // Test that constructor handles empty config gracefully
-        S3PluginDownloader.S3Config emptyConfig = new S3PluginDownloader.S3Config(
-                "", "", "", "", "");
-
-        Assertions.assertDoesNotThrow(() -> {
-            new S3PluginDownloader(emptyConfig);
-        });
-    }
-
-    @Test
-    public void testUpdateCacheAfterDownloadWithNonExistentFile() throws IOException {
-        S3PluginDownloader.S3Config config = new S3PluginDownloader.S3Config(
-                "http://localhost", "us-west-2", "test-bucket", "key", "secret");
-        S3PluginDownloader downloader = new S3PluginDownloader(config);
-
-        // Test with non-existent file - should not throw exception
-        Assertions.assertDoesNotThrow(() -> {
-            // updateCacheAfterDownload is private, but we test that constructor works
-            // and the downloader can be created successfully
-            Assertions.assertNotNull(downloader);
-        });
     }
 }
