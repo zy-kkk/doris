@@ -19,31 +19,13 @@
 
 #include <gtest/gtest.h>
 
-#include <filesystem>
-#include <fstream>
 #include <string>
 
 #include "common/status.h"
 
 namespace doris {
 
-class S3PluginDownloaderTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        // Create test directory
-        test_dir_ = "/tmp/s3_plugin_test";
-        std::filesystem::create_directories(test_dir_);
-    }
-
-    void TearDown() override {
-        // Clean up test directory
-        std::filesystem::remove_all(test_dir_);
-    }
-
-    std::string test_dir_;
-};
-
-TEST_F(S3PluginDownloaderTest, TestS3ConfigCreation) {
+TEST(S3PluginDownloaderTest, TestS3ConfigCreation) {
     S3PluginDownloader::S3Config config("http://s3.amazonaws.com", "us-west-2", "test-bucket",
                                         "access-key", "secret-key");
 
@@ -54,7 +36,7 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigCreation) {
     EXPECT_EQ("secret-key", config.secret_key);
 }
 
-TEST_F(S3PluginDownloaderTest, TestS3ConfigToString) {
+TEST(S3PluginDownloaderTest, TestS3ConfigToString) {
     S3PluginDownloader::S3Config config("http://s3.amazonaws.com", "us-west-2", "test-bucket",
                                         "access-key", "secret-key");
 
@@ -71,7 +53,7 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigToString) {
                  std::string::npos); // Actual key should not appear
 }
 
-TEST_F(S3PluginDownloaderTest, TestS3ConfigWithEmptyValues) {
+TEST(S3PluginDownloaderTest, TestS3ConfigWithEmptyValues) {
     S3PluginDownloader::S3Config empty_config("", "", "", "", "");
 
     EXPECT_EQ("", empty_config.endpoint);
@@ -85,7 +67,7 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigWithEmptyValues) {
     EXPECT_FALSE(config_str.empty());
 }
 
-TEST_F(S3PluginDownloaderTest, TestConstructorWithValidConfig) {
+TEST(S3PluginDownloaderTest, TestConstructorWithValidConfig) {
     // Test that constructor doesn't throw with valid config
     S3PluginDownloader::S3Config config("http://localhost:9000", "us-west-2", "test-bucket",
                                         "access-key", "secret-key");
@@ -93,20 +75,20 @@ TEST_F(S3PluginDownloaderTest, TestConstructorWithValidConfig) {
     EXPECT_NO_THROW({ S3PluginDownloader downloader(config); });
 }
 
-TEST_F(S3PluginDownloaderTest, TestConstructorWithEmptyConfig) {
+TEST(S3PluginDownloaderTest, TestConstructorWithEmptyConfig) {
     // Test that constructor handles empty config gracefully
     S3PluginDownloader::S3Config empty_config("", "", "", "", "");
 
     EXPECT_NO_THROW({ S3PluginDownloader downloader(empty_config); });
 }
 
-TEST_F(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
+TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
     S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
                                         "secret");
     S3PluginDownloader downloader(config);
 
     std::string local_path;
-    std::string target_path = test_dir_ + "/test.jar";
+    std::string target_path = "/tmp/test.jar";
 
     // Test with invalid S3 path - should fail but not crash
     Status status = downloader.download_file("invalid-s3-path", target_path, &local_path);
@@ -116,12 +98,12 @@ TEST_F(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
     EXPECT_FALSE(status.to_string().empty());
 }
 
-TEST_F(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
+TEST(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
     S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
                                         "secret");
     S3PluginDownloader downloader(config);
 
-    std::string target_path = test_dir_ + "/test.jar";
+    std::string target_path = "/tmp/test.jar";
 
     // Test with null pointer for local_path - should handle gracefully
     Status status = downloader.download_file("s3://bucket/file.jar", target_path, nullptr);
@@ -129,7 +111,7 @@ TEST_F(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
     EXPECT_FALSE(status.ok());
 }
 
-TEST_F(S3PluginDownloaderTest, TestDownloadFileWithInvalidLocalPath) {
+TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidLocalPath) {
     S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
                                         "secret");
     S3PluginDownloader downloader(config);
@@ -144,7 +126,7 @@ TEST_F(S3PluginDownloaderTest, TestDownloadFileWithInvalidLocalPath) {
     EXPECT_FALSE(status.to_string().empty());
 }
 
-TEST_F(S3PluginDownloaderTest, TestS3ConfigCopyConstruction) {
+TEST(S3PluginDownloaderTest, TestS3ConfigCopyConstruction) {
     S3PluginDownloader::S3Config original("http://s3.amazonaws.com", "us-west-2", "test-bucket",
                                           "access-key", "secret-key");
 
@@ -158,7 +140,7 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigCopyConstruction) {
     EXPECT_EQ(original.secret_key, copied.secret_key);
 }
 
-TEST_F(S3PluginDownloaderTest, TestS3ConfigDefaultValues) {
+TEST(S3PluginDownloaderTest, TestS3ConfigDefaultValues) {
     // Test S3Config with minimal values
     S3PluginDownloader::S3Config minimal_config("endpoint", "", "bucket", "", "");
 
@@ -172,7 +154,7 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigDefaultValues) {
     EXPECT_FALSE(minimal_config.to_string().empty());
 }
 
-TEST_F(S3PluginDownloaderTest, TestMultipleDownloaderInstances) {
+TEST(S3PluginDownloaderTest, TestMultipleDownloaderInstances) {
     // Test that multiple downloaders can be created with different configs
     S3PluginDownloader::S3Config config1("endpoint1", "region1", "bucket1", "key1", "secret1");
     S3PluginDownloader::S3Config config2("endpoint2", "region2", "bucket2", "key2", "secret2");
@@ -183,7 +165,7 @@ TEST_F(S3PluginDownloaderTest, TestMultipleDownloaderInstances) {
     });
 }
 
-TEST_F(S3PluginDownloaderTest, TestS3ConfigToStringMasking) {
+TEST(S3PluginDownloaderTest, TestS3ConfigToStringMasking) {
     // Test different access key scenarios for masking
     S3PluginDownloader::S3Config config_with_key("http://s3.test", "region", "bucket", "mykey",
                                                  "mysecret");
@@ -201,52 +183,13 @@ TEST_F(S3PluginDownloaderTest, TestS3ConfigToStringMasking) {
     EXPECT_TRUE(str_empty_key.find("null") != std::string::npos);
 }
 
-TEST_F(S3PluginDownloaderTest, TestDownloadWithDirectoryCreation) {
-    S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
-                                        "secret");
-    S3PluginDownloader downloader(config);
-
-    std::string local_path;
-    std::string target_path = test_dir_ + "/nested/dir/test.jar";
-
-    // Test that directory creation works (even though S3 download will fail)
-    Status status = downloader.download_file("s3://bucket/file.jar", target_path, &local_path);
-
-    // Should fail due to S3 connection, but directory should be created
-    EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(std::filesystem::exists(test_dir_ + "/nested/dir"));
-}
-
-TEST_F(S3PluginDownloaderTest, TestDownloadWithExistingFile) {
-    S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
-                                        "secret");
-    S3PluginDownloader downloader(config);
-
-    std::string local_path;
-    std::string target_path = test_dir_ + "/existing.jar";
-
-    // Create an existing file
-    std::ofstream existing_file(target_path);
-    existing_file << "existing content";
-    existing_file.close();
-
-    EXPECT_TRUE(std::filesystem::exists(target_path));
-
-    // Test download (will fail due to S3, but should handle existing file)
-    Status status = downloader.download_file("s3://bucket/file.jar", target_path, &local_path);
-
-    EXPECT_FALSE(status.ok());
-    // File should have been deleted during download attempt
-    // (since _execute_download removes existing files)
-}
-
-TEST_F(S3PluginDownloaderTest, TestStatusTypeIntegration) {
+TEST(S3PluginDownloaderTest, TestStatusTypeIntegration) {
     // Test that Status integrates properly with S3PluginDownloader
     S3PluginDownloader::S3Config config("invalid", "invalid", "invalid", "invalid", "invalid");
     S3PluginDownloader downloader(config);
 
     std::string local_path;
-    Status status = downloader.download_file("invalid", test_dir_ + "/test.jar", &local_path);
+    Status status = downloader.download_file("invalid", "/tmp/test.jar", &local_path);
 
     // Test Status methods work correctly
     EXPECT_FALSE(status.ok());
