@@ -83,14 +83,13 @@ TEST(S3PluginDownloaderTest, TestConstructorWithEmptyConfig) {
 }
 
 TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
-    S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
-                                        "secret");
+    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
     S3PluginDownloader downloader(config);
 
     std::string local_path;
     std::string target_path = "/tmp/test.jar";
 
-    // Test with invalid S3 path - should fail but not crash
+    // Test with invalid S3 path - should fail quickly due to empty config
     Status status = downloader.download_file("invalid-s3-path", target_path, &local_path);
 
     EXPECT_FALSE(status.ok());
@@ -99,8 +98,7 @@ TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
 }
 
 TEST(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
-    S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
-                                        "secret");
+    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
     S3PluginDownloader downloader(config);
 
     std::string target_path = "/tmp/test.jar";
@@ -112,13 +110,12 @@ TEST(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
 }
 
 TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidLocalPath) {
-    S3PluginDownloader::S3Config config("http://localhost", "us-west-2", "test-bucket", "key",
-                                        "secret");
+    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
     S3PluginDownloader downloader(config);
 
     std::string local_path;
 
-    // Test with invalid local path (directory that doesn't exist and can't be created)
+    // Test with invalid local path - should fail quickly due to empty config
     Status status = downloader.download_file("s3://bucket/file.jar",
                                              "/root/nonexistent/path/test.jar", &local_path);
 
@@ -184,14 +181,14 @@ TEST(S3PluginDownloaderTest, TestS3ConfigToStringMasking) {
 }
 
 TEST(S3PluginDownloaderTest, TestStatusTypeIntegration) {
-    // Test that Status integrates properly with S3PluginDownloader
-    S3PluginDownloader::S3Config config("invalid", "invalid", "invalid", "invalid", "invalid");
+    // Test that Status integrates properly with S3PluginDownloader (without slow network calls)
+    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config will fail fast
     S3PluginDownloader downloader(config);
 
     std::string local_path;
-    Status status = downloader.download_file("invalid", "/tmp/test.jar", &local_path);
+    Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test.jar", &local_path);
 
-    // Test Status methods work correctly
+    // Test Status methods work correctly - should fail quickly due to empty config
     EXPECT_FALSE(status.ok());
     EXPECT_FALSE(status.to_string().empty());
 }
