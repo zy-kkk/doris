@@ -344,10 +344,19 @@ TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
                                         {"AKIAIOSFODNN7EXAMPLE", "***"},
                                         {"very-long-access-key-with-special-chars!@#$%", "***"}};
 
-    for (const auto& test_case : test_cases) {
+    for (size_t i = 0; i < test_cases.size(); ++i) {
+        const auto& test_case = test_cases[i];
         S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "prefix",
                                             test_case.access_key, "secret");
         std::string str = config.to_string();
+
+        // Debug output
+        std::cout << "Test case " << i << ": access_key='" << test_case.access_key
+                  << "', length=" << test_case.access_key.length()
+                  << ", empty=" << (test_case.access_key.empty() ? "true" : "false")
+                  << ", expected='" << test_case.expected_in_string << "', actual='" << str << "'"
+                  << std::endl;
+
         EXPECT_TRUE(str.find(test_case.expected_in_string) != std::string::npos)
                 << "Expected '" << test_case.expected_in_string << "' in string: " << str;
 
