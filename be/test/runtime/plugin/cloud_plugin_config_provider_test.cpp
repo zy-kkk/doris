@@ -405,10 +405,10 @@ TEST_F(CloudPluginConfigProviderTest, TestVaultInfosEdgeCases) {
 
     // The status could indicate various failure scenarios:
     // - NOT_FOUND: No storage vault info available (lines 64-66)
-    // - NOT_SUPPORTED: Only S3-compatible storage is supported (line 83)
+    // - NOT_IMPLEMENTED_ERROR: Only S3-compatible storage is supported (line 83)
     // - INTERNAL_ERROR: CloudMetaMgr operation failed
     EXPECT_TRUE(status.code() == ErrorCode::NOT_FOUND ||
-                status.code() == ErrorCode::NOT_SUPPORTED ||
+                status.code() == ErrorCode::NOT_IMPLEMENTED_ERROR ||
                 status.code() == ErrorCode::INTERNAL_ERROR);
 }
 
