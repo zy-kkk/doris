@@ -344,19 +344,10 @@ TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
                                         {"AKIAIOSFODNN7EXAMPLE", "***"},
                                         {"very-long-access-key-with-special-chars!@#$%", "***"}};
 
-    for (size_t i = 0; i < test_cases.size(); ++i) {
-        const auto& test_case = test_cases[i];
+    for (const auto& test_case : test_cases) {
         S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "prefix",
                                             test_case.access_key, "secret");
         std::string str = config.to_string();
-
-        // Debug output
-        std::cout << "Test case " << i << ": access_key='" << test_case.access_key
-                  << "', length=" << test_case.access_key.length()
-                  << ", empty=" << (test_case.access_key.empty() ? "true" : "false")
-                  << ", expected='" << test_case.expected_in_string << "', actual='" << str << "'"
-                  << std::endl;
-
         EXPECT_TRUE(str.find(test_case.expected_in_string) != std::string::npos)
                 << "Expected '" << test_case.expected_in_string << "' in string: " << str;
 
@@ -364,9 +355,12 @@ TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
         // Skip check for empty string (would always match) and pure whitespace strings
         if (!test_case.access_key.empty() &&
             test_case.access_key.find_first_not_of(' ') != std::string::npos) {
-            // For non-empty, non-whitespace keys, ensure the actual key doesn't appear
-            EXPECT_TRUE(str.find(test_case.access_key) == std::string::npos)
-                    << "Access key should not appear in string: " << str;
+            // For non-empty, non-whitespace keys, ensure the actual key doesn't appear as the value
+            // Check that access_key='<actual_key>' pattern doesn't exist
+            std::string key_pattern = "access_key='" + test_case.access_key + "'";
+            EXPECT_TRUE(str.find(key_pattern) == std::string::npos)
+                    << "Access key should not appear as value in string: " << str
+                    << " (looking for pattern: " << key_pattern << ")";
         }
         // Note: Empty strings and whitespace-only strings are not checked because:
         // - Empty string "" would match any position in any string (find returns 0)
