@@ -243,15 +243,18 @@ TEST_F(CloudPluginConfigProviderTest, TestS3ConfigPrefixVariations) {
 
 // Test 12: Exception handling during storage engine access
 TEST_F(CloudPluginConfigProviderTest, TestExceptionHandling) {
-    // Test with null storage engine
-    ExecEnv::GetInstance()->set_storage_engine(nullptr);
+    // Note: Cannot test with null storage engine due to assertion failure in storage_engine()
+    // Instead, test with regular storage engine which will trigger different error path
+    SetupRegularStorageEngine();
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
 
-    // This should trigger exception handling path
-    EXPECT_ANY_THROW({
-        [[maybe_unused]] auto status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
-    });
+    // This should return error status instead of throwing
+    Status status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
+    EXPECT_TRUE(status.to_string().find("CloudStorageEngine not found") != std::string::npos);
 }
 
 // Test 13: Test both regular and cloud storage engine scenarios
