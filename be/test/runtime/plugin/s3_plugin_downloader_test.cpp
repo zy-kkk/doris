@@ -67,16 +67,17 @@ TEST(S3PluginDownloaderTest, TestS3FilesystemCreationException) {
 }
 
 TEST(S3PluginDownloaderTest, TestValidS3Config) {
-    S3PluginDownloader::S3Config valid_config("http://localhost:9000", "us-west-2", "test-bucket",
-                                              "prefix", "access", "secret");
+    // Use invalid endpoint for quick test without network timeout
+    S3PluginDownloader::S3Config valid_config("http://invalid-test-config", "us-west-2",
+                                              "test-bucket", "prefix", "access", "secret");
 
     EXPECT_NO_THROW({ S3PluginDownloader downloader(valid_config); });
 }
 
 TEST(S3PluginDownloaderTest, TestDownloadWithValidFilesystem) {
-    // Use invalid endpoint to ensure quick failure without network timeout
-    S3PluginDownloader::S3Config config("http://invalid-endpoint-12345", "region", "bucket",
-                                        "prefix", "key", "secret");
+    // Use clearly invalid endpoint that won't be resolved
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "region", "bucket", "prefix",
+                                        "key", "secret");
     S3PluginDownloader downloader(config);
 
     std::string local_path;
@@ -116,8 +117,8 @@ TEST(S3PluginDownloaderTest, TestS3ConfigPrefixInToString) {
 // Test directory creation failure scenario
 TEST(S3PluginDownloaderTest, TestDirectoryCreationFailure) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://nonexistent-endpoint-test", "region", "bucket",
-                                        "prefix", "access", "secret");
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "region", "bucket", "prefix",
+                                        "access", "secret");
     S3PluginDownloader downloader(config);
 
     std::string local_path;
@@ -133,8 +134,8 @@ TEST(S3PluginDownloaderTest, TestDirectoryCreationFailure) {
 // Test file deletion scenario by creating a file first
 TEST(S3PluginDownloaderTest, TestExistingFileHandling) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://nonexistent-test-endpoint", "region", "bucket",
-                                        "prefix", "access", "secret");
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "region", "bucket", "prefix",
+                                        "access", "secret");
     S3PluginDownloader downloader(config);
 
     // Create a temporary file to test deletion logic
@@ -196,8 +197,8 @@ TEST(S3PluginDownloaderTest, TestS3FilesystemCreationFailure) {
 // Test successful path through _execute_download (mock scenario)
 TEST(S3PluginDownloaderTest, TestExecuteDownloadPathTraversal) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://invalid-test-endpoint-path", "us-west-2",
-                                        "test-bucket", "prefix", "access", "secret");
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "us-west-2", "test-bucket",
+                                        "prefix", "access", "secret");
     S3PluginDownloader downloader(config);
 
     std::string local_path;
@@ -222,8 +223,8 @@ TEST(S3PluginDownloaderTest, TestExecuteDownloadPathTraversal) {
 // Test concurrent downloads (mutex coverage)
 TEST(S3PluginDownloaderTest, TestConcurrentDownloads) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://invalid-concurrent-test", "us-west-2",
-                                        "test-bucket", "prefix", "access", "secret");
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "us-west-2", "test-bucket",
+                                        "prefix", "access", "secret");
     S3PluginDownloader downloader(config);
 
     // This test exercises the mutex in _execute_download
@@ -243,8 +244,8 @@ TEST(S3PluginDownloaderTest, TestConcurrentDownloads) {
 
 // Test successful configuration setup and filesystem creation
 TEST(S3PluginDownloaderTest, TestSuccessfulS3ConfigSetup) {
-    // Test with a valid-looking configuration that should create filesystem
-    S3PluginDownloader::S3Config valid_config("https://s3.amazonaws.com", "us-east-1",
+    // Test with invalid endpoint to avoid network delays
+    S3PluginDownloader::S3Config valid_config("https://invalid-s3-test.example.com", "us-east-1",
                                               "valid-bucket", "plugins/", "AKIA123", "secret123");
 
     // This should not throw and should create the downloader successfully
@@ -252,7 +253,7 @@ TEST(S3PluginDownloaderTest, TestSuccessfulS3ConfigSetup) {
         S3PluginDownloader downloader(valid_config);
 
         // Test the configuration values are set correctly
-        EXPECT_EQ(valid_config.endpoint, "https://s3.amazonaws.com");
+        EXPECT_EQ(valid_config.endpoint, "https://invalid-s3-test.example.com");
         EXPECT_EQ(valid_config.region, "us-east-1");
         EXPECT_EQ(valid_config.bucket, "valid-bucket");
         EXPECT_EQ(valid_config.prefix, "plugins/");
@@ -288,18 +289,19 @@ TEST(S3PluginDownloaderTest, TestDownloadPathCompletionScenarios) {
 
 // Test S3Config edge cases and boundary conditions
 TEST(S3PluginDownloaderTest, TestS3ConfigBoundaryConditions) {
-    // Test with special characters in configuration
-    S3PluginDownloader::S3Config special_chars("https://s3-test.example.com", "us-west-2!@#",
-                                               "bucket-with-dashes_123", "path/with/slashes/",
-                                               "ACCESS_KEY_123", "secret/with+special=chars");
+    // Test with special characters in configuration - use invalid endpoint
+    S3PluginDownloader::S3Config special_chars(
+            "https://invalid-special-test.example.com", "us-west-2!@#", "bucket-with-dashes_123",
+            "path/with/slashes/", "ACCESS_KEY_123", "secret/with+special=chars");
 
     std::string config_str = special_chars.to_string();
     EXPECT_TRUE(config_str.find("***") != std::string::npos);
     EXPECT_TRUE(config_str.find("path/with/slashes/") != std::string::npos);
 
-    // Test with Unicode characters (if supported)
-    S3PluginDownloader::S3Config unicode_config("https://endpoint.com", "region", "bucket-测试",
-                                                "前缀/", "access", "secret");
+    // Test with Unicode characters (if supported) - use invalid endpoint
+    S3PluginDownloader::S3Config unicode_config("https://invalid-unicode-test.example.com",
+                                                "region", "bucket-测试", "前缀/", "access",
+                                                "secret");
     EXPECT_EQ(unicode_config.bucket, "bucket-测试");
     EXPECT_EQ(unicode_config.prefix, "前缀/");
 }
@@ -307,7 +309,7 @@ TEST(S3PluginDownloaderTest, TestS3ConfigBoundaryConditions) {
 // Test to verify mutex behavior is working correctly
 TEST(S3PluginDownloaderTest, TestMutexProtectionVerification) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://invalid-mutex-test", "region", "bucket", "prefix",
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "region", "bucket", "prefix",
                                         "access", "secret");
     S3PluginDownloader downloader(config);
 
@@ -349,21 +351,25 @@ TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
         EXPECT_TRUE(str.find(test_case.expected_in_string) != std::string::npos)
                 << "Expected '" << test_case.expected_in_string << "' in string: " << str;
 
-        // Verify actual access_key is never exposed in string (except for empty case)
-        if (!test_case.access_key.empty() && test_case.access_key != "   ") {
+        // Verify actual access_key is never exposed in string
+        // Skip check for empty string (would always match) and whitespace-only strings
+        if (!test_case.access_key.empty() && test_case.access_key != "   " &&
+            test_case.access_key.find_first_not_of(' ') != std::string::npos) {
             // For non-whitespace keys, ensure the actual key doesn't appear
             EXPECT_TRUE(str.find(test_case.access_key) == std::string::npos)
                     << "Access key should not appear in string: " << str;
         }
-        // For whitespace-only keys, they might still appear in the string, so don't check
+        // Note: Empty strings and whitespace-only strings are not checked because:
+        // - Empty string "" would match any position in any string
+        // - Whitespace strings might appear naturally in formatted output
     }
 }
 
 // Test edge cases in directory creation and file handling
 TEST(S3PluginDownloaderTest, TestFileOperationEdgeCases) {
     // Use invalid endpoint for quick failure
-    S3PluginDownloader::S3Config config("http://invalid-file-ops-test", "region", "bucket",
-                                        "prefix", "access", "secret");
+    S3PluginDownloader::S3Config config("http://127.0.0.1:99999", "region", "bucket", "prefix",
+                                        "access", "secret");
     S3PluginDownloader downloader(config);
 
     std::vector<std::string> test_paths = {"/tmp/simple.jar", "/tmp/deep/nested/path/file.jar",
