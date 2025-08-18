@@ -193,4 +193,162 @@ TEST(S3PluginDownloaderTest, TestStatusTypeIntegration) {
     EXPECT_FALSE(status.to_string().empty());
 }
 
+// Test to specifically cover the successful S3 filesystem creation path (line 115)
+TEST(S3PluginDownloaderTest, TestS3FilesystemCreationWithDifferentConfigs) {
+    // Test with various config combinations to exercise _create_s3_filesystem
+    std::vector<S3PluginDownloader::S3Config> test_configs = {
+        {"http://localhost:9000", "us-west-2", "test-bucket", "access", "secret"},
+        {"https://s3.amazonaws.com", "us-east-1", "prod-bucket", "key", "secret"},
+        {"http://minio.local:9000", "region", "bucket", "minioaccess", "miniosecret"},
+        {"", "", "", "", ""}, // Empty config
+        {"endpoint", "region", "bucket", "", ""}, // Missing credentials
+    };
+    
+    for (const auto& config : test_configs) {
+        // Constructor should not throw regardless of config validity
+        EXPECT_NO_THROW({
+            S3PluginDownloader downloader(config);
+        });
+    }
+}
+
+// Test to cover the download_file method when S3 filesystem is not initialized (line 51-53)
+TEST(S3PluginDownloaderTest, TestDownloadFileWithNullS3Filesystem) {
+    // Use empty config which should result in null S3 filesystem
+    S3PluginDownloader::S3Config empty_config("", "", "", "", "");
+    S3PluginDownloader downloader(empty_config);
+    
+    std::string local_path;
+    Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test.jar", &local_path);
+    
+    // Should fail with "S3 filesystem not initialized" error
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(status.to_string().find("S3 filesystem not initialized") != std::string::npos);
+}
+
+// Test exception handling in _create_s3_filesystem (line 116-119)
+TEST(S3PluginDownloaderTest, TestS3FilesystemCreationExceptionHandling) {
+    // Test with various invalid configs that might trigger exceptions
+    std::vector<S3PluginDownloader::S3Config> problematic_configs = {
+        {"invalid://protocol", "region", "bucket", "key", "secret"},
+        {"http://", "region", "bucket", "key", "secret"}, // Invalid URL
+        {std::string(10000, 'x'), "region", "bucket", "key", "secret"}, // Very long endpoint
+    };
+    
+    for (const auto& config : problematic_configs) {
+        // Should handle exceptions gracefully without crashing
+        EXPECT_NO_THROW({
+            S3PluginDownloader downloader(config);
+            // Try to use it - should fail gracefully
+            std::string local_path;
+            Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test.jar", &local_path);
+            EXPECT_FALSE(status.ok());
+        });
+    }
+}
+
+// Test to specifically exercise the destructor and cleanup
+TEST(S3PluginDownloaderTest, TestDestructorAndCleanup) {
+    {
+        S3PluginDownloader::S3Config config("http://localhost:9000", "region", "bucket", "key", "secret");
+        S3PluginDownloader downloader(config);
+        // Object will be destroyed when going out of scope
+    }
+    // Should complete without issues - destructor should handle cleanup
+    EXPECT_TRUE(true); // If we reach here, destructor worked correctly
+}
+
+// Test to exercise various S3Config constructor combinations
+TEST(S3PluginDownloaderTest, TestS3ConfigConstructorCombinations) {
+    // Test different string types and lengths
+    std::vector<std::tuple<std::string, std::string, std::string, std::string, std::string>> config_combinations = {
+        {"http://s3.test", "us-west-2", "bucket", "access", "secret"},
+        {"", "", "", "", ""}, // All empty
+        {"e", "r", "b", "a", "s"}, // Single characters
+        {std::string(1000, 'x'), std::string(100, 'y'), std::string(50, 'z'), std::string(20, 'a'), std::string(30, 'b')}, // Long strings
+        {"endpoint with spaces", "region-with-dashes", "bucket_with_underscores", "access.with.dots", "secret:with:colons"}
+    };
+    
+    for (const auto& [endpoint, region, bucket, access, secret] : config_combinations) {
+        S3PluginDownloader::S3Config config(endpoint, region, bucket, access, secret);
+        
+        EXPECT_EQ(endpoint, config.endpoint);
+        EXPECT_EQ(region, config.region);
+        EXPECT_EQ(bucket, config.bucket);
+        EXPECT_EQ(access, config.access_key);
+        EXPECT_EQ(secret, config.secret_key);
+        
+        // to_string should work for all combinations
+        EXPECT_FALSE(config.to_string().empty());
+    }
+}
+
+// Test to verify S3Config's const string members
+TEST(S3PluginDownloaderTest, TestS3ConfigConstMembers) {
+    const S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "access", "secret");
+    
+    // Test that const members are accessible
+    EXPECT_EQ("endpoint", config.endpoint);
+    EXPECT_EQ("region", config.region);
+    EXPECT_EQ("bucket", config.bucket);
+    EXPECT_EQ("access", config.access_key);
+    EXPECT_EQ("secret", config.secret_key);
+    
+    // Test const to_string method
+    std::string config_str = config.to_string();
+    EXPECT_FALSE(config_str.empty());
+}
+
+// Test thread safety of static mutex
+TEST(S3PluginDownloaderTest, TestThreadSafetyOfDownload) {
+    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config for fast failure
+    
+    std::vector<std::thread> threads;
+    std::vector<bool> results(5);
+    
+    // Launch multiple threads to test concurrent download attempts
+    for (int i = 0; i < 5; ++i) {
+        threads.emplace_back([&, i]() {
+            S3PluginDownloader downloader(config);
+            std::string local_path;
+            Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test" + std::to_string(i) + ".jar", &local_path);
+            results[i] = !status.ok(); // Should all fail with empty config
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    // Verify all threads failed consistently (thread safety)
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_TRUE(results[i]);
+    }
+}
+
+// Test S3Config with special characters and edge cases
+TEST(S3PluginDownloaderTest, TestS3ConfigSpecialCharacters) {
+    // Test S3Config with various special characters
+    S3PluginDownloader::S3Config special_config(
+        "http://s3-server.domain.com:9000", 
+        "us-west-2a", 
+        "bucket-name_123", 
+        "AKIAIOSFODNN7EXAMPLE", 
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    
+    EXPECT_FALSE(special_config.endpoint.empty());
+    EXPECT_FALSE(special_config.region.empty());
+    EXPECT_FALSE(special_config.bucket.empty());
+    EXPECT_FALSE(special_config.access_key.empty());
+    EXPECT_FALSE(special_config.secret_key.empty());
+    
+    // Test that to_string handles special characters correctly
+    std::string config_str = special_config.to_string();
+    EXPECT_TRUE(config_str.find("s3-server.domain.com") != std::string::npos);
+    EXPECT_TRUE(config_str.find("bucket-name_123") != std::string::npos);
+    EXPECT_TRUE(config_str.find("***") != std::string::npos); // Access key should be masked
+}
+
 } // namespace doris

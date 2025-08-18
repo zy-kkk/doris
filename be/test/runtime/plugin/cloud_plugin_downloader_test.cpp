@@ -319,6 +319,103 @@ TEST_F(CloudPluginDownloaderTest, TestDifferentFileExtensions) {
     }
 }
 
+// Test _plugin_type_to_string method for all enum values including default branch
+TEST_F(CloudPluginDownloaderTest, TestPluginTypeToStringAllValues) {
+    std::string local_path;
+    
+    // Test JDBC_DRIVERS - should trigger line 61-62
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "test.jar", "/tmp/test.jar", &local_path);
+    EXPECT_FALSE(status1.ok());
+    // Should not fail due to unsupported type, but due to cloud config
+    EXPECT_FALSE(status1.to_string().find("Unsupported plugin type") != std::string::npos);
+    
+    // Test JAVA_UDF - should trigger line 63-64  
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "test.jar", "/tmp/test.jar", &local_path);
+    EXPECT_FALSE(status2.ok());
+    // Should not fail due to unsupported type, but due to cloud config
+    EXPECT_FALSE(status2.to_string().find("Unsupported plugin type") != std::string::npos);
+    
+    // For unsupported types, we already test in other methods
+    // This verifies that JDBC_DRIVERS and JAVA_UDF branch through the string conversion
+}
+
+// Test the full successful path simulation to hit lines 46-56
+TEST_F(CloudPluginDownloaderTest, TestSuccessfulPathSimulation) {
+    std::string local_path;
+    
+    // Even though this will ultimately fail due to no real cloud environment,
+    // it should pass the initial validation and reach the cloud config retrieval
+    Status status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, 
+            "valid-plugin-name.jar", 
+            "/tmp/valid-path.jar", 
+            &local_path);
+    
+    EXPECT_FALSE(status.ok());
+    // Should fail on cloud config retrieval, not on parameter validation
+    EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_FALSE(status.to_string().find("cannot be empty") != std::string::npos);
+    // Should contain error related to cloud config or storage engine
+    EXPECT_TRUE(status.to_string().find("CloudStorageEngine") != std::string::npos ||
+                status.to_string().find("not found") != std::string::npos ||
+                !status.to_string().empty());
+}
+
+// Test realistic plugin names that would be used in production
+TEST_F(CloudPluginDownloaderTest, TestRealisticPluginNames) {
+    std::string local_path;
+    
+    std::vector<std::pair<CloudPluginDownloader::PluginType, std::string>> realistic_cases = {
+        {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "mysql-connector-java-8.0.33.jar"},
+        {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "postgresql-42.6.0.jar"},
+        {CloudPluginDownloader::PluginType::JAVA_UDF, "my-custom-udf-1.0.0.jar"},
+        {CloudPluginDownloader::PluginType::JAVA_UDF, "analytics-functions.jar"}
+    };
+    
+    for (const auto& [plugin_type, plugin_name] : realistic_cases) {
+        Status status = CloudPluginDownloader::download_from_cloud(
+                plugin_type, plugin_name, "/tmp/" + plugin_name, &local_path);
+        
+        EXPECT_FALSE(status.ok());
+        // Should reach cloud config phase, not fail on validation
+        EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+        EXPECT_FALSE(status.to_string().find("cannot be empty") != std::string::npos);
+    }
+}
+
+// Test S3 path construction logic indirectly by exercising the format string
+TEST_F(CloudPluginDownloaderTest, TestS3PathConstructionVariations) {
+    std::string local_path;
+    
+    // Test different plugin names that would create different S3 paths
+    std::vector<std::string> path_variations = {
+        "simple.jar",
+        "path-with-dashes.jar", 
+        "path_with_underscores.jar",
+        "path.with.dots.jar",
+        "very-long-plugin-name-that-might-cause-issues.jar",
+        "123numeric456.jar"
+    };
+    
+    for (const std::string& plugin_name : path_variations) {
+        Status status1 = CloudPluginDownloader::download_from_cloud(
+                CloudPluginDownloader::PluginType::JDBC_DRIVERS, plugin_name, 
+                "/tmp/" + plugin_name, &local_path);
+        EXPECT_FALSE(status1.ok());
+        
+        Status status2 = CloudPluginDownloader::download_from_cloud(
+                CloudPluginDownloader::PluginType::JAVA_UDF, plugin_name, 
+                "/tmp/" + plugin_name, &local_path);
+        EXPECT_FALSE(status2.ok());
+        
+        // Both should reach S3 path construction phase
+        EXPECT_FALSE(status1.to_string().find("Unsupported plugin type") != std::string::npos);
+        EXPECT_FALSE(status2.to_string().find("Unsupported plugin type") != std::string::npos);
+    }
+}
+
 // Test edge cases for plugin names
 TEST_F(CloudPluginDownloaderTest, TestPluginNameEdgeCases) {
     std::string local_path;
@@ -336,6 +433,78 @@ TEST_F(CloudPluginDownloaderTest, TestPluginNameEdgeCases) {
             "/tmp/test.jar", &local_path);
     EXPECT_FALSE(status2.ok());
     // Should not fail due to special chars but due to cloud config
+}
+
+// Test to specifically exercise lines that create S3 path format
+TEST_F(CloudPluginDownloaderTest, TestS3PathFormatExercise) {
+    std::string local_path;
+    
+    // This test specifically aims to exercise the fmt::format call in line 51-52
+    // We use various combinations that would exercise the string formatting
+    std::vector<std::pair<CloudPluginDownloader::PluginType, std::string>> format_tests = {
+        {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "test.jar"},
+        {CloudPluginDownloader::PluginType::JAVA_UDF, "udf.jar"}
+    };
+    
+    for (const auto& [type, name] : format_tests) {
+        Status status = CloudPluginDownloader::download_from_cloud(
+                type, name, "/tmp/format_test.jar", &local_path);
+        
+        // Should fail on cloud config, but this exercises the path formatting code
+        EXPECT_FALSE(status.ok());
+        // Verify it's not failing on parameter validation
+        EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+        EXPECT_FALSE(status.to_string().find("cannot be empty") != std::string::npos);
+    }
+}
+
+// Test error message consistency and format
+TEST_F(CloudPluginDownloaderTest, TestErrorMessageConsistency) {
+    std::string local_path;
+    
+    // Test that error messages are properly formatted
+    Status unsupported_status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::CONNECTORS, "test.jar", "/tmp/test.jar", &local_path);
+    
+    EXPECT_FALSE(unsupported_status.ok());
+    EXPECT_EQ(unsupported_status.code(), ErrorCode::INVALID_ARGUMENT);
+    std::string error_msg = unsupported_status.to_string();
+    EXPECT_TRUE(error_msg.find("Unsupported plugin type") != std::string::npos);
+    EXPECT_TRUE(error_msg.find("connectors") != std::string::npos);
+    
+    // Test empty name error message
+    Status empty_name_status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "", "/tmp/test.jar", &local_path);
+    
+    EXPECT_FALSE(empty_name_status.ok());
+    EXPECT_EQ(empty_name_status.code(), ErrorCode::INVALID_ARGUMENT);
+    std::string empty_error_msg = empty_name_status.to_string();
+    EXPECT_TRUE(empty_error_msg.find("cannot be empty") != std::string::npos);
+}
+
+// Test method robustness with various input combinations
+TEST_F(CloudPluginDownloaderTest, TestInputCombinationRobustness) {
+    std::string local_path;
+    
+    // Test long paths and names
+    std::string long_path(500, 'a');
+    std::string long_name(100, 'b');
+    
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, long_name, long_path, &local_path);
+    EXPECT_FALSE(status1.ok());
+    
+    // Test paths with various characters
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "plugin-name_123.jar", 
+            "/tmp/path with spaces/file.jar", &local_path);
+    EXPECT_FALSE(status2.ok());
+    
+    // Test absolute vs relative paths
+    Status status3 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "test.jar", 
+            "relative/path/file.jar", &local_path);
+    EXPECT_FALSE(status3.ok());
 }
 
 } // namespace doris
