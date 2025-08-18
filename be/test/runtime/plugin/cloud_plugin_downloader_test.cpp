@@ -248,23 +248,43 @@ TEST_F(CloudPluginDownloaderTest, TestPluginTypeToStringDefaultCase) {
 TEST_F(CloudPluginDownloaderTest, TestAllPluginTypeEnumValues) {
     std::string local_path;
 
-    // Test all enum values explicitly to ensure complete coverage
-    std::vector<std::pair<CloudPluginDownloader::PluginType, std::string>> plugin_types = {
-            {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "jdbc_drivers"},
-            {CloudPluginDownloader::PluginType::JAVA_UDF, "java_udf"},
+    // Test unsupported plugin types - these should fail with plugin type in error message
+    std::vector<std::pair<CloudPluginDownloader::PluginType, std::string>> unsupported_types = {
             {CloudPluginDownloader::PluginType::CONNECTORS, "connectors"},
             {CloudPluginDownloader::PluginType::HADOOP_CONF, "hadoop_conf"},
             {static_cast<CloudPluginDownloader::PluginType>(999),
              "unknown"} // Invalid enum -> default case
     };
 
-    for (const auto& [plugin_type, expected_string] : plugin_types) {
+    for (const auto& [plugin_type, expected_string] : unsupported_types) {
         Status status = CloudPluginDownloader::download_from_cloud(plugin_type, "test-file.jar",
                                                                    "/tmp/test.jar", &local_path);
 
         EXPECT_FALSE(status.ok());
+        EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
+        EXPECT_TRUE(status.to_string().find("Unsupported plugin type") != std::string::npos);
         EXPECT_TRUE(status.to_string().find(expected_string) != std::string::npos)
                 << "Expected '" << expected_string << "' in error message: " << status.to_string();
+    }
+
+    // Test supported plugin types - these should pass plugin type check but fail later
+    std::vector<CloudPluginDownloader::PluginType> supported_types = {
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS,
+            CloudPluginDownloader::PluginType::JAVA_UDF};
+
+    for (const auto& plugin_type : supported_types) {
+        Status status = CloudPluginDownloader::download_from_cloud(plugin_type, "test-file.jar",
+                                                                   "/tmp/test.jar", &local_path);
+
+        EXPECT_FALSE(status.ok());
+        // Should NOT have "Unsupported plugin type" error since these are supported
+        EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos)
+                << "Supported plugin type should not show 'Unsupported plugin type' error: "
+                << status.to_string();
+        // Should fail at CloudStorageEngine level or later
+        EXPECT_TRUE(status.code() == ErrorCode::NOT_FOUND ||
+                    status.code() == ErrorCode::INTERNAL_ERROR)
+                << "Expected NOT_FOUND or INTERNAL_ERROR, got: " << status.to_string();
     }
 }
 
