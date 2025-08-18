@@ -38,6 +38,17 @@ protected:
 
         // Set DORIS_HOME for testing
         setenv("DORIS_HOME", "/tmp/test_doris", 1);
+
+        // Initialize test JDBC parameters
+        param_.catalog_id = 1;
+        param_.driver_path = "test-driver.jar";
+        param_.driver_class = "com.test.Driver";
+        param_.resource_name = "test_resource";
+        param_.driver_checksum = "test_checksum";
+        param_.jdbc_url = "jdbc:test://localhost:3306/test";
+        param_.user = "test_user";
+        param_.passwd = "test_passwd";
+        param_.query_string = "SELECT * FROM test";
     }
 
     void TearDown() override {
@@ -51,14 +62,17 @@ protected:
         }
     }
 
+    JdbcConnector createConnector() { return JdbcConnector(param_); }
+
 private:
     std::string original_jdbc_drivers_dir_;
     const char* original_doris_home_ = nullptr;
+    JdbcConnectorParam param_;
 };
 
 // Test _get_real_url method
 TEST_F(JdbcConnectorTest, TestGetRealUrlWithAbsoluteUrl) {
-    JdbcConnector connector;
+    auto connector = createConnector();
     std::string result_url;
 
     // Test with absolute URL (contains ":/ ")
@@ -78,7 +92,7 @@ TEST_F(JdbcConnectorTest, TestGetRealUrlWithAbsoluteUrl) {
 }
 
 TEST_F(JdbcConnectorTest, TestGetRealUrlWithRelativeUrl) {
-    JdbcConnector connector;
+    auto connector = createConnector();
     std::string result_url;
 
     // Test with relative URL (no ":/" found) - should call _check_and_return_default_driver_url
@@ -91,7 +105,7 @@ TEST_F(JdbcConnectorTest, TestGetRealUrlWithRelativeUrl) {
 
 // Test _check_and_return_default_driver_url method with default directory
 TEST_F(JdbcConnectorTest, TestCheckAndReturnDefaultDriverUrlWithDefaultConfig) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Set config to default value to trigger the default directory logic
     config::jdbc_drivers_dir = "/tmp/test_doris/plugins/jdbc_drivers";
@@ -106,7 +120,7 @@ TEST_F(JdbcConnectorTest, TestCheckAndReturnDefaultDriverUrlWithDefaultConfig) {
 }
 
 TEST_F(JdbcConnectorTest, TestCheckAndReturnDefaultDriverUrlWithCustomConfig) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Set custom JDBC drivers directory
     config::jdbc_drivers_dir = "/custom/jdbc/path";
@@ -120,7 +134,7 @@ TEST_F(JdbcConnectorTest, TestCheckAndReturnDefaultDriverUrlWithCustomConfig) {
 }
 
 TEST_F(JdbcConnectorTest, TestDefaultDirectoryFileExistsPath) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Set config to default value
     config::jdbc_drivers_dir = "/tmp/test_doris/plugins/jdbc_drivers";
@@ -151,7 +165,7 @@ TEST_F(JdbcConnectorTest, TestDefaultDirectoryFileExistsPath) {
 
 // Simplified test without cloud mode dependency
 TEST_F(JdbcConnectorTest, TestCloudModeSimulation) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Set config to default value
     config::jdbc_drivers_dir = "/tmp/test_doris/plugins/jdbc_drivers";
@@ -166,7 +180,7 @@ TEST_F(JdbcConnectorTest, TestCloudModeSimulation) {
 }
 
 TEST_F(JdbcConnectorTest, TestFallbackToOldDirectory) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Set config to default value but file doesn't exist in new directory
     config::jdbc_drivers_dir = "/tmp/test_doris/plugins/jdbc_drivers";
@@ -181,7 +195,7 @@ TEST_F(JdbcConnectorTest, TestFallbackToOldDirectory) {
 }
 
 TEST_F(JdbcConnectorTest, TestPathConstruction) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     // Test different DORIS_HOME values
     setenv("DORIS_HOME", "/test/doris", 1);
@@ -197,7 +211,7 @@ TEST_F(JdbcConnectorTest, TestPathConstruction) {
 }
 
 TEST_F(JdbcConnectorTest, TestEdgeCases) {
-    JdbcConnector connector;
+    auto connector = createConnector();
     std::string result_url;
 
     // Test empty URL
@@ -214,7 +228,7 @@ TEST_F(JdbcConnectorTest, TestEdgeCases) {
 }
 
 TEST_F(JdbcConnectorTest, TestMultipleCallsConsistency) {
-    JdbcConnector connector;
+    auto connector = createConnector();
 
     config::jdbc_drivers_dir = "/tmp/test_doris/plugins/jdbc_drivers";
 
@@ -230,7 +244,7 @@ TEST_F(JdbcConnectorTest, TestMultipleCallsConsistency) {
 }
 
 TEST_F(JdbcConnectorTest, TestUrlDetectionLogic) {
-    JdbcConnector connector;
+    auto connector = createConnector();
     std::string result_url;
 
     // Test various URL patterns that should be detected as absolute
