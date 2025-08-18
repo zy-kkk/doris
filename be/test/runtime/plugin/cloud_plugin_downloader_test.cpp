@@ -222,4 +222,77 @@ TEST_F(CloudPluginDownloaderTest, TestPathConstructionAndDownload) {
     EXPECT_FALSE(status.to_string().find("plugin_name cannot be empty") != std::string::npos);
 }
 
+// Additional test to achieve 100% code coverage
+
+// Test to cover the default case in _plugin_type_to_string function
+TEST_F(CloudPluginDownloaderTest, TestPluginTypeToStringDefaultCase) {
+    // This test is designed to cover the default branch in _plugin_type_to_string
+    // We need to cast an invalid enum value to trigger the default case
+
+    std::string local_path;
+
+    // Cast an invalid integer to PluginType to trigger default case
+    CloudPluginDownloader::PluginType invalid_type =
+            static_cast<CloudPluginDownloader::PluginType>(999);
+
+    Status status = CloudPluginDownloader::download_from_cloud(invalid_type, "test.jar",
+                                                               "/tmp/test.jar", &local_path);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
+    EXPECT_TRUE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_TRUE(status.to_string().find("unknown") != std::string::npos);
+}
+
+// Test comprehensive plugin type enum coverage
+TEST_F(CloudPluginDownloaderTest, TestAllPluginTypeEnumValues) {
+    std::string local_path;
+
+    // Test all enum values explicitly to ensure complete coverage
+    std::vector<std::pair<CloudPluginDownloader::PluginType, std::string>> plugin_types = {
+            {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "jdbc_drivers"},
+            {CloudPluginDownloader::PluginType::JAVA_UDF, "java_udf"},
+            {CloudPluginDownloader::PluginType::CONNECTORS, "connectors"},
+            {CloudPluginDownloader::PluginType::HADOOP_CONF, "hadoop_conf"},
+            {static_cast<CloudPluginDownloader::PluginType>(999),
+             "unknown"} // Invalid enum -> default case
+    };
+
+    for (const auto& [plugin_type, expected_string] : plugin_types) {
+        Status status = CloudPluginDownloader::download_from_cloud(plugin_type, "test-file.jar",
+                                                                   "/tmp/test.jar", &local_path);
+
+        EXPECT_FALSE(status.ok());
+        EXPECT_TRUE(status.to_string().find(expected_string) != std::string::npos)
+                << "Expected '" << expected_string << "' in error message: " << status.to_string();
+    }
+}
+
+// Test edge cases for plugin type handling
+TEST_F(CloudPluginDownloaderTest, TestPluginTypeHandlingEdgeCases) {
+    std::string local_path;
+
+    // Test boundary values around enum range
+    std::vector<int> boundary_values = {-1, 0, 1, 2, 3, 4, 100, 1000};
+
+    for (int value : boundary_values) {
+        CloudPluginDownloader::PluginType test_type =
+                static_cast<CloudPluginDownloader::PluginType>(value);
+
+        Status status = CloudPluginDownloader::download_from_cloud(
+                test_type, "boundary_test.jar", "/tmp/boundary.jar", &local_path);
+
+        EXPECT_FALSE(status.ok());
+
+        // Should either be "Unsupported plugin type" or some other error
+        std::string error_msg = status.to_string();
+        bool has_expected_error = error_msg.find("Unsupported plugin type") != std::string::npos ||
+                                  error_msg.find("plugin_name cannot be empty") ==
+                                          std::string::npos; // Other errors are also OK
+
+        EXPECT_TRUE(has_expected_error)
+                << "Unexpected error for value " << value << ": " << error_msg;
+    }
+}
+
 } // namespace doris

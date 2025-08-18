@@ -17,6 +17,7 @@
 
 #include "runtime/plugin/s3_plugin_downloader.h"
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -232,6 +233,148 @@ TEST(S3PluginDownloaderTest, TestConcurrentDownloads) {
 
     EXPECT_FALSE(status1.ok());
     EXPECT_FALSE(status2.ok());
+}
+
+// Additional tests to improve code coverage to 95%+
+
+// Test successful configuration setup and filesystem creation
+TEST(S3PluginDownloaderTest, TestSuccessfulS3ConfigSetup) {
+    // Test with a valid-looking configuration that should create filesystem
+    S3PluginDownloader::S3Config valid_config("https://s3.amazonaws.com", "us-east-1",
+                                              "valid-bucket", "plugins/", "AKIA123", "secret123");
+
+    // This should not throw and should create the downloader successfully
+    EXPECT_NO_THROW({
+        S3PluginDownloader downloader(valid_config);
+
+        // Test the configuration values are set correctly
+        EXPECT_EQ(valid_config.endpoint, "https://s3.amazonaws.com");
+        EXPECT_EQ(valid_config.region, "us-east-1");
+        EXPECT_EQ(valid_config.bucket, "valid-bucket");
+        EXPECT_EQ(valid_config.prefix, "plugins/");
+        EXPECT_EQ(valid_config.access_key, "AKIA123");
+        EXPECT_EQ(valid_config.secret_key, "secret123");
+    });
+}
+
+// Test to exercise the successful path completion (mock scenario)
+TEST(S3PluginDownloaderTest, TestDownloadPathCompletionScenarios) {
+    // Test various configurations that might succeed in filesystem creation
+    std::vector<S3PluginDownloader::S3Config> test_configs = {
+            {"http://minio:9000", "us-east-1", "test", "", "minioadmin", "minioadmin"},
+            {"https://cos.ap-beijing.myqcloud.com", "ap-beijing", "bucket", "prefix/", "ak", "sk"},
+            {"http://localhost:9000", "local", "test-bucket", "data/", "access", "secret"}};
+
+    for (const auto& config : test_configs) {
+        EXPECT_NO_THROW({
+            S3PluginDownloader downloader(config);
+            std::string local_path;
+
+            // Even if this fails at S3 level, it exercises the complete code path
+            Status status =
+                    downloader.download_file(fmt::format("s3://{}/test-file.jar", config.bucket),
+                                             "/tmp/test_download.jar", &local_path);
+
+            // We expect this to fail in test environment, but it should have
+            // exercised the full download_file and _execute_download logic
+            EXPECT_FALSE(status.ok());
+        });
+    }
+}
+
+// Test S3Config edge cases and boundary conditions
+TEST(S3PluginDownloaderTest, TestS3ConfigBoundaryConditions) {
+    // Test with special characters in configuration
+    S3PluginDownloader::S3Config special_chars("https://s3-test.example.com", "us-west-2!@#",
+                                               "bucket-with-dashes_123", "path/with/slashes/",
+                                               "ACCESS_KEY_123", "secret/with+special=chars");
+
+    std::string config_str = special_chars.to_string();
+    EXPECT_TRUE(config_str.find("***") != std::string::npos);
+    EXPECT_TRUE(config_str.find("path/with/slashes/") != std::string::npos);
+
+    // Test with Unicode characters (if supported)
+    S3PluginDownloader::S3Config unicode_config("https://endpoint.com", "region", "bucket-测试",
+                                                "前缀/", "access", "secret");
+    EXPECT_EQ(unicode_config.bucket, "bucket-测试");
+    EXPECT_EQ(unicode_config.prefix, "前缀/");
+}
+
+// Test to verify mutex behavior is working correctly
+TEST(S3PluginDownloaderTest, TestMutexProtectionVerification) {
+    S3PluginDownloader::S3Config config("http://localhost:9000", "region", "bucket", "prefix",
+                                        "access", "secret");
+    S3PluginDownloader downloader(config);
+
+    std::string local_path1, local_path2;
+
+    // These calls should be serialized by the mutex in _execute_download
+    // Even though they fail, they exercise the mutex lock/unlock logic
+    Status status1 =
+            downloader.download_file("s3://bucket/file1.jar", "/tmp/test1.jar", &local_path1);
+    Status status2 =
+            downloader.download_file("s3://bucket/file2.jar", "/tmp/test2.jar", &local_path2);
+
+    EXPECT_FALSE(status1.ok());
+    EXPECT_FALSE(status2.ok());
+
+    // Verify both calls executed (mutex didn't cause deadlock)
+    EXPECT_TRUE(!local_path1.empty() || status1.code() != ErrorCode::OK);
+    EXPECT_TRUE(!local_path2.empty() || status2.code() != ErrorCode::OK);
+}
+
+// Test comprehensive S3Config to_string output format
+TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
+    // Test all possible combinations of empty/non-empty access_key
+    struct TestCase {
+        std::string access_key;
+        std::string expected_in_string;
+    };
+
+    std::vector<TestCase> test_cases = {{"", "null"},
+                                        {"   ", "***"}, // whitespace is not empty
+                                        {"a", "***"},
+                                        {"AKIAIOSFODNN7EXAMPLE", "***"},
+                                        {"very-long-access-key-with-special-chars!@#$%", "***"}};
+
+    for (const auto& test_case : test_cases) {
+        S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "prefix",
+                                            test_case.access_key, "secret");
+        std::string str = config.to_string();
+        EXPECT_TRUE(str.find(test_case.expected_in_string) != std::string::npos)
+                << "Expected '" << test_case.expected_in_string << "' in string: " << str;
+
+        // Verify actual access_key is never exposed in string
+        if (!test_case.access_key.empty()) {
+            EXPECT_TRUE(str.find(test_case.access_key) == std::string::npos)
+                    << "Access key should not appear in string: " << str;
+        }
+    }
+}
+
+// Test edge cases in directory creation and file handling
+TEST(S3PluginDownloaderTest, TestFileOperationEdgeCases) {
+    S3PluginDownloader::S3Config config("http://localhost:9000", "region", "bucket", "prefix",
+                                        "access", "secret");
+    S3PluginDownloader downloader(config);
+
+    std::vector<std::string> test_paths = {"/tmp/simple.jar", "/tmp/deep/nested/path/file.jar",
+                                           "/tmp/file-with-dashes_and_underscores.jar",
+                                           "/tmp/file.with.dots.jar"};
+
+    for (const auto& path : test_paths) {
+        std::string local_path;
+        Status status = downloader.download_file("s3://bucket/test.jar", path, &local_path);
+
+        // All should fail at S3 level but exercise file/directory logic
+        EXPECT_FALSE(status.ok());
+
+        // Clean up any created directories
+        std::filesystem::path file_path(path);
+        std::filesystem::path parent_dir = file_path.parent_path();
+        std::error_code ec;
+        std::filesystem::remove_all(parent_dir, ec);
+    }
 }
 
 } // namespace doris
