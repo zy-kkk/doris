@@ -110,4 +110,10 @@ TEST_F(CloudPluginConfigProviderTest, TestS3ConfigNonCloudEnvironment) {
     EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
 }
 
+TEST_F(CloudPluginConfigProviderTest, TestS3ConfigValidation) {
+    std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
+    Status status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
+    EXPECT_FALSE(status.ok());
+}
+
 } // namespace doris

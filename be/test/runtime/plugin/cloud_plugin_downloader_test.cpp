@@ -80,4 +80,26 @@ TEST_F(CloudPluginDownloaderTest, TestPluginTypeToString) {
     EXPECT_TRUE(status.to_string().find("hadoop_conf") != std::string::npos);
 }
 
+TEST_F(CloudPluginDownloaderTest, TestJdbcDriversPluginType) {
+    std::string local_path;
+    Status status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "test.jar", "/tmp/test.jar",
+            &local_path);
+    EXPECT_FALSE(status.ok());
+    EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+}
+
+TEST_F(CloudPluginDownloaderTest, TestPluginTypeStringConversion) {
+    std::string local_path;
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "udf.jar", "/tmp/udf.jar", &local_path);
+    EXPECT_FALSE(status1.ok());
+
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::CONNECTORS, "connector.jar", "/tmp/connector.jar",
+            &local_path);
+    EXPECT_FALSE(status2.ok());
+    EXPECT_TRUE(status2.to_string().find("connectors") != std::string::npos);
+}
+
 } // namespace doris

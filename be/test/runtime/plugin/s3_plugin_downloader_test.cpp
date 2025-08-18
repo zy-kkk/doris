@@ -66,4 +66,26 @@ TEST(S3PluginDownloaderTest, TestValidS3Config) {
     EXPECT_NO_THROW({ S3PluginDownloader downloader(valid_config); });
 }
 
+TEST(S3PluginDownloaderTest, TestDownloadWithValidFilesystem) {
+    S3PluginDownloader::S3Config config("http://endpoint", "region", "bucket", "key", "secret");
+    S3PluginDownloader downloader(config);
+
+    std::string local_path;
+    Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test.jar", &local_path);
+
+    EXPECT_FALSE(status.ok());
+}
+
+TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatting) {
+    S3PluginDownloader::S3Config config_with_key("endpoint", "region", "bucket", "access-key",
+                                                 "secret");
+    std::string str_with_key = config_with_key.to_string();
+    EXPECT_TRUE(str_with_key.find("***") != std::string::npos);
+    EXPECT_FALSE(str_with_key.find("access-key") != std::string::npos);
+
+    S3PluginDownloader::S3Config config_empty_key("endpoint", "region", "bucket", "", "secret");
+    std::string str_empty_key = config_empty_key.to_string();
+    EXPECT_TRUE(str_empty_key.find("null") != std::string::npos);
+}
+
 } // namespace doris
