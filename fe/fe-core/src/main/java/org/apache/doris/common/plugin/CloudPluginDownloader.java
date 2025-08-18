@@ -75,11 +75,10 @@ public class CloudPluginDownloader {
 
         // 1. Get cloud configuration and build S3 path
         S3PluginDownloader.S3Config s3Config = CloudPluginConfigProvider.getCloudS3Config();
-        String instanceId = CloudPluginConfigProvider.getCloudInstanceId();
 
         // 2. Direct path construction
         String s3Path = String.format("s3://%s/%s/plugins/%s/%s",
-                s3Config.bucket, instanceId, pluginType.getDirectoryName(), pluginName);
+                s3Config.bucket, s3Config.prefix, pluginType.getDirectoryName(), pluginName);
 
         // 3. Execute download with graceful degradation based on user intent
         try (S3PluginDownloader downloader = new S3PluginDownloader(s3Config)) {

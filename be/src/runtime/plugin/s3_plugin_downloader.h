@@ -41,14 +41,17 @@ public:
         std::string endpoint;
         std::string region;
         std::string bucket;
+        std::string prefix;
         std::string access_key;
         std::string secret_key;
 
         S3Config(const std::string& endpoint, const std::string& region, const std::string& bucket,
-                 const std::string& access_key, const std::string& secret_key)
+                 const std::string& prefix, const std::string& access_key,
+                 const std::string& secret_key)
                 : endpoint(endpoint),
                   region(region),
                   bucket(bucket),
+                  prefix(prefix),
                   access_key(access_key),
                   secret_key(secret_key) {}
 

@@ -34,8 +34,9 @@ namespace doris {
 
 std::mutex S3PluginDownloader::_download_mutex;
 std::string S3PluginDownloader::S3Config::to_string() const {
-    return fmt::format("S3Config{{endpoint='{}', region='{}', bucket='{}', access_key='{}'}}",
-                       endpoint, region, bucket, access_key.empty() ? "null" : "***");
+    return fmt::format(
+            "S3Config{{endpoint='{}', region='{}', bucket='{}', prefix='{}', access_key='{}'}}",
+            endpoint, region, bucket, prefix, access_key.empty() ? "null" : "***");
 }
 
 S3PluginDownloader::S3PluginDownloader(const S3Config& config) : _config(config) {

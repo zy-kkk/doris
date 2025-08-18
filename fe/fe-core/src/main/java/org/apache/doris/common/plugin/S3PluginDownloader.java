@@ -48,22 +48,24 @@ public class S3PluginDownloader implements AutoCloseable {
         public final String endpoint;
         public final String region;
         public final String bucket;
+        public final String prefix;
         public final String accessKey;
         public final String secretKey;
 
-        public S3Config(String endpoint, String region, String bucket,
+        public S3Config(String endpoint, String region, String bucket, String prefix,
                 String accessKey, String secretKey) {
             this.endpoint = endpoint;
             this.region = region;
             this.bucket = bucket;
+            this.prefix = prefix;
             this.accessKey = accessKey;
             this.secretKey = secretKey;
         }
 
         @Override
         public String toString() {
-            return String.format("S3Config{endpoint='%s', region='%s', bucket='%s', accessKey='%s'}",
-                    endpoint, region, bucket, accessKey != null ? "***" : "null");
+            return String.format("S3Config{endpoint='%s', region='%s', bucket='%s', prefix='%s', accessKey='%s'}",
+                    endpoint, region, bucket, prefix, accessKey != null ? "***" : "null");
         }
     }
 

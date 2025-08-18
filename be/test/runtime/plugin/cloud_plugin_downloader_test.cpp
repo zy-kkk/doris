@@ -19,8 +19,10 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <string>
 
+#include "cloud/cloud_storage_engine.h"
 #include "common/status.h"
 #include "olap/options.h"
 #include "olap/storage_engine.h"
@@ -41,6 +43,13 @@ protected:
     void TearDown() override {
         // Cleanup storage engine
         ExecEnv::GetInstance()->set_storage_engine(nullptr);
+    }
+
+    void SetupCloudStorageEngine() {
+        doris::EngineOptions options;
+        auto cloud_engine = std::make_unique<CloudStorageEngine>(options);
+        std::unique_ptr<BaseStorageEngine> base_engine(cloud_engine.release());
+        ExecEnv::GetInstance()->set_storage_engine(std::move(base_engine));
     }
 };
 
@@ -100,6 +109,117 @@ TEST_F(CloudPluginDownloaderTest, TestPluginTypeStringConversion) {
             &local_path);
     EXPECT_FALSE(status2.ok());
     EXPECT_TRUE(status2.to_string().find("connectors") != std::string::npos);
+}
+
+// Test all plugin type string conversions to cover _plugin_type_to_string function
+TEST_F(CloudPluginDownloaderTest, TestAllPluginTypeStrings) {
+    std::string local_path;
+
+    // Test JDBC_DRIVERS - should pass type check but fail at config
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "driver.jar", "/tmp/driver.jar",
+            &local_path);
+    EXPECT_FALSE(status1.ok());
+    EXPECT_FALSE(status1.to_string().find("Unsupported plugin type") != std::string::npos);
+
+    // Test JAVA_UDF - should pass type check but fail at config
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "udf.jar", "/tmp/udf.jar", &local_path);
+    EXPECT_FALSE(status2.ok());
+    EXPECT_FALSE(status2.to_string().find("Unsupported plugin type") != std::string::npos);
+
+    // Test CONNECTORS - should fail at type check
+    Status status3 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::CONNECTORS, "connector.jar", "/tmp/connector.jar",
+            &local_path);
+    EXPECT_FALSE(status3.ok());
+    EXPECT_TRUE(status3.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_TRUE(status3.to_string().find("connectors") != std::string::npos);
+
+    // Test HADOOP_CONF - should fail at type check
+    Status status4 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::HADOOP_CONF, "core-site.xml", "/tmp/core-site.xml",
+            &local_path);
+    EXPECT_FALSE(status4.ok());
+    EXPECT_TRUE(status4.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_TRUE(status4.to_string().find("hadoop_conf") != std::string::npos);
+}
+
+// Test cloud storage engine configuration retrieval failure
+TEST_F(CloudPluginDownloaderTest, TestCloudConfigRetrievalFailure) {
+    // Setup CloudStorageEngine but it will fail to get vault info
+    SetupCloudStorageEngine();
+
+    std::string local_path;
+    Status status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "test.jar", "/tmp/test.jar", &local_path);
+
+    // Should fail at CloudPluginConfigProvider::get_cloud_s3_config
+    EXPECT_FALSE(status.ok());
+    // Should not be "Unsupported plugin type" or "cannot be empty" errors
+    EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_FALSE(status.to_string().find("cannot be empty") != std::string::npos);
+}
+
+// Test different supported plugin types with cloud engine
+TEST_F(CloudPluginDownloaderTest, TestSupportedTypesWithCloudEngine) {
+    SetupCloudStorageEngine();
+
+    std::string local_path;
+
+    // Test JDBC_DRIVERS
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "mysql-connector.jar",
+            "/tmp/mysql.jar", &local_path);
+    EXPECT_FALSE(status1.ok());
+    // Should pass plugin type check, fail later
+    EXPECT_FALSE(status1.to_string().find("Unsupported plugin type") != std::string::npos);
+
+    // Test JAVA_UDF
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "my-udf.jar", "/tmp/udf.jar", &local_path);
+    EXPECT_FALSE(status2.ok());
+    // Should pass plugin type check, fail later
+    EXPECT_FALSE(status2.to_string().find("Unsupported plugin type") != std::string::npos);
+}
+
+// Test edge cases for plugin names
+TEST_F(CloudPluginDownloaderTest, TestPluginNameEdgeCases) {
+    std::string local_path;
+
+    // Test empty plugin name with supported type
+    Status status1 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "", "/tmp/test.jar", &local_path);
+    EXPECT_FALSE(status1.ok());
+    EXPECT_EQ(status1.code(), ErrorCode::INVALID_ARGUMENT);
+    EXPECT_TRUE(status1.to_string().find("plugin_name cannot be empty") != std::string::npos);
+
+    // Test whitespace-only plugin name (still not empty string)
+    Status status2 = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JAVA_UDF, "   ", "/tmp/test.jar", &local_path);
+    EXPECT_FALSE(status2.ok());
+    // Should pass empty check, fail at config retrieval
+    EXPECT_FALSE(status2.to_string().find("plugin_name cannot be empty") != std::string::npos);
+}
+
+// Test path construction and S3 downloader creation (will fail but exercises code)
+TEST_F(CloudPluginDownloaderTest, TestPathConstructionAndDownload) {
+    SetupCloudStorageEngine();
+
+    std::string local_path;
+    Status status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "test-driver.jar", "/tmp/driver.jar",
+            &local_path);
+
+    // This will fail because:
+    // 1. CloudStorageEngine exists (passes dynamic_cast)
+    // 2. But CloudMetaMgr is not properly initialized in test
+    // 3. So get_cloud_s3_config will fail
+    EXPECT_FALSE(status.ok());
+
+    // But it should have exercised the code path up to S3 config retrieval
+    EXPECT_FALSE(status.to_string().find("Unsupported plugin type") != std::string::npos);
+    EXPECT_FALSE(status.to_string().find("plugin_name cannot be empty") != std::string::npos);
 }
 
 } // namespace doris

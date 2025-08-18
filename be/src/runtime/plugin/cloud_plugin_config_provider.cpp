@@ -29,7 +29,7 @@ namespace doris {
 
 Status CloudPluginConfigProvider::get_cloud_s3_config(
         std::unique_ptr<S3PluginDownloader::S3Config>* s3_config) {
-    S3PluginDownloader::S3Config config("", "", "", "", "");
+    S3PluginDownloader::S3Config config("", "", "", "", "", "");
     Status status = _get_default_storage_vault_info(&config);
     RETURN_IF_ERROR(status);
 
@@ -41,41 +41,8 @@ Status CloudPluginConfigProvider::get_cloud_s3_config(
     }
 
     *s3_config = std::make_unique<S3PluginDownloader::S3Config>(
-            config.endpoint, config.region, config.bucket, config.access_key, config.secret_key);
-    return Status::OK();
-}
-
-Status CloudPluginConfigProvider::get_cloud_instance_id(std::string* instance_id) {
-    if (config::cluster_id == -1) {
-        std::string cloud_unique_id = config::cloud_unique_id;
-        if (cloud_unique_id.empty()) {
-            return Status::InvalidArgument("cloud_unique_id is empty");
-        }
-
-        // Parse cloud_unique_id format: "1:instanceId:randomString"
-        std::vector<std::string> parts;
-        size_t start = 0;
-        size_t end = cloud_unique_id.find(':');
-
-        while (end != std::string::npos) {
-            parts.push_back(cloud_unique_id.substr(start, end - start));
-            start = end + 1;
-            end = cloud_unique_id.find(':', start);
-        }
-        parts.push_back(cloud_unique_id.substr(start));
-
-        if (parts.size() >= 2) {
-            *instance_id = parts[1];
-            LOG(INFO) << "Using parsed instance_id: " << *instance_id;
-        } else {
-            LOG(WARNING) << "Failed to parse cloud_unique_id (only " << parts.size()
-                         << " parts), using entire value as instance_id: " << cloud_unique_id;
-            *instance_id = cloud_unique_id;
-        }
-    } else {
-        *instance_id = std::to_string(config::cluster_id);
-        LOG(INFO) << "Using configured cluster_id as instance_id: " << *instance_id;
-    }
+            config.endpoint, config.region, config.bucket, config.prefix, config.access_key,
+            config.secret_key);
     return Status::OK();
 }
 
@@ -104,10 +71,12 @@ Status CloudPluginConfigProvider::_get_default_storage_vault_info(
             s3_config->endpoint = s3_conf->client_conf.endpoint;
             s3_config->region = s3_conf->client_conf.region;
             s3_config->bucket = s3_conf->bucket;
+            s3_config->prefix = s3_conf->prefix;
             s3_config->access_key = s3_conf->client_conf.ak;
             s3_config->secret_key = s3_conf->client_conf.sk;
 
-            LOG(INFO) << "Using storage vault for plugin download: " << vault_name;
+            LOG(INFO) << "Using storage vault for plugin download: " << vault_name
+                      << ", prefix: " << s3_conf->prefix;
             return Status::OK();
         }
 

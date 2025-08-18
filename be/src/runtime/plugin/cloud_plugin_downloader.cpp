@@ -43,13 +43,10 @@ Status CloudPluginDownloader::download_from_cloud(PluginType plugin_type,
     Status status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
     RETURN_IF_ERROR(status);
 
-    std::string instance_id;
-    status = CloudPluginConfigProvider::get_cloud_instance_id(&instance_id);
-    RETURN_IF_ERROR(status);
-
-    // 2. Direct path construction
-    std::string s3_path = fmt::format("s3://{}/{}/plugins/{}/{}", s3_config->bucket, instance_id,
-                                      _plugin_type_to_string(plugin_type), plugin_name);
+    // 2. Direct path construction using prefix from s3_config
+    std::string s3_path =
+            fmt::format("s3://{}/{}/plugins/{}/{}", s3_config->bucket, s3_config->prefix,
+                        _plugin_type_to_string(plugin_type), plugin_name);
 
     // 3. Execute download
     S3PluginDownloader downloader(*s3_config);

@@ -33,9 +33,6 @@ public:
     // Get S3 configuration from cloud mode
     static Status get_cloud_s3_config(std::unique_ptr<S3PluginDownloader::S3Config>* s3_config);
 
-    // Get cloud instance ID
-    static Status get_cloud_instance_id(std::string* instance_id);
-
 private:
     // Get default storage vault info using CloudMetaMgr
     static Status _get_default_storage_vault_info(S3PluginDownloader::S3Config* s3_config);

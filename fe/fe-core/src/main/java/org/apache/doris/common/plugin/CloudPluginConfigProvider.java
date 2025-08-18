@@ -18,7 +18,6 @@
 package org.apache.doris.common.plugin;
 
 import org.apache.doris.catalog.Env;
-import org.apache.doris.cloud.catalog.CloudEnv;
 import org.apache.doris.cloud.proto.Cloud;
 import org.apache.doris.cloud.rpc.MetaServiceProxy;
 import org.apache.doris.common.Config;
@@ -61,28 +60,10 @@ public class CloudPluginConfigProvider {
                 objInfo.getEndpoint(),
                 objInfo.getRegion(),
                 objInfo.getBucket(),
+                objInfo.getPrefix(),
                 objInfo.getAk(),
                 objInfo.getSk()
         );
-    }
-
-    /**
-     * Get cloud instance ID - exposed for direct path construction
-     *
-     * @return cloud instance ID
-     */
-    public static String getCloudInstanceId() {
-        // Get from CloudEnv first
-        if (Env.getCurrentEnv() instanceof CloudEnv) {
-            String instanceId = ((CloudEnv) Env.getCurrentEnv()).getCloudInstanceId();
-            if (!Strings.isNullOrEmpty(instanceId)) {
-                return instanceId;
-            } else {
-                throw new RuntimeException("CloudEnv instance ID is null or empty");
-            }
-        } else {
-            throw new RuntimeException("CloudEnv instance ID is null or empty");
-        }
     }
 
     // ======================== Private Helper Methods ========================
