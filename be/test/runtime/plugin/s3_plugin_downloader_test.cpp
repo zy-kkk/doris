@@ -176,7 +176,7 @@ TEST(S3PluginDownloaderTest, TestS3FilesystemCreationFailure) {
     // Test with various invalid configurations to trigger creation failure
     S3PluginDownloader::S3Config invalid_configs[] = {
             {"", "", "", "", "", ""}, // All empty
-            {"invalid://nonexistent-endpoint-failure-test", "region", "bucket", "prefix", "key",
+            {"http://127.0.0.1:99999", "region", "bucket", "prefix", "key",
              "secret"},                      // Invalid endpoint
             {"endpoint", "", "", "", "", ""} // Empty fields
     };
@@ -266,9 +266,9 @@ TEST(S3PluginDownloaderTest, TestSuccessfulS3ConfigSetup) {
 TEST(S3PluginDownloaderTest, TestDownloadPathCompletionScenarios) {
     // Test various configurations with invalid endpoints for quick failure
     std::vector<S3PluginDownloader::S3Config> test_configs = {
-            {"http://invalid-minio-test", "us-east-1", "test", "", "minioadmin", "minioadmin"},
-            {"http://invalid-cos-test", "ap-beijing", "bucket", "prefix/", "ak", "sk"},
-            {"http://invalid-localhost-test", "local", "test-bucket", "data/", "access", "secret"}};
+            {"http://127.0.0.1:99999", "us-east-1", "test", "", "minioadmin", "minioadmin"},
+            {"http://127.0.0.1:99998", "ap-beijing", "bucket", "prefix/", "ak", "sk"},
+            {"http://127.0.0.1:99997", "local", "test-bucket", "data/", "access", "secret"}};
 
     for (const auto& config : test_configs) {
         EXPECT_NO_THROW({
@@ -352,16 +352,16 @@ TEST(S3PluginDownloaderTest, TestS3ConfigStringFormatComprehensive) {
                 << "Expected '" << test_case.expected_in_string << "' in string: " << str;
 
         // Verify actual access_key is never exposed in string
-        // Skip check for empty string (would always match) and whitespace-only strings
-        if (!test_case.access_key.empty() && test_case.access_key != "   " &&
+        // Skip check for empty string (would always match) and pure whitespace strings
+        if (!test_case.access_key.empty() &&
             test_case.access_key.find_first_not_of(' ') != std::string::npos) {
-            // For non-whitespace keys, ensure the actual key doesn't appear
+            // For non-empty, non-whitespace keys, ensure the actual key doesn't appear
             EXPECT_TRUE(str.find(test_case.access_key) == std::string::npos)
                     << "Access key should not appear in string: " << str;
         }
         // Note: Empty strings and whitespace-only strings are not checked because:
-        // - Empty string "" would match any position in any string
-        // - Whitespace strings might appear naturally in formatted output
+        // - Empty string "" would match any position in any string (find returns 0)
+        // - Pure whitespace strings might appear naturally in formatted output
     }
 }
 
