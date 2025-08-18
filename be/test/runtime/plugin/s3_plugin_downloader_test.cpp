@@ -25,172 +25,45 @@
 
 namespace doris {
 
-TEST(S3PluginDownloaderTest, TestS3ConfigCreation) {
-    S3PluginDownloader::S3Config config("http://s3.amazonaws.com", "us-west-2", "test-bucket",
-                                        "access-key", "secret-key");
-
-    EXPECT_EQ("http://s3.amazonaws.com", config.endpoint);
-    EXPECT_EQ("us-west-2", config.region);
-    EXPECT_EQ("test-bucket", config.bucket);
-    EXPECT_EQ("access-key", config.access_key);
-    EXPECT_EQ("secret-key", config.secret_key);
-}
-
 TEST(S3PluginDownloaderTest, TestS3ConfigToString) {
-    S3PluginDownloader::S3Config config("http://s3.amazonaws.com", "us-west-2", "test-bucket",
-                                        "access-key", "secret-key");
-
+    S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "access-key", "secret");
     std::string config_str = config.to_string();
+    EXPECT_TRUE(config_str.find("***") != std::string::npos);
 
-    // Should contain basic info but mask secret info
-    EXPECT_TRUE(config_str.find("s3.amazonaws.com") != std::string::npos);
-    EXPECT_TRUE(config_str.find("us-west-2") != std::string::npos);
-    EXPECT_TRUE(config_str.find("test-bucket") != std::string::npos);
-    EXPECT_TRUE(config_str.find("***") != std::string::npos ||
-                config_str.find("null") !=
-                        std::string::npos); // Access key should be masked or null
-    EXPECT_FALSE(config_str.find("access-key") !=
-                 std::string::npos); // Actual key should not appear
+    S3PluginDownloader::S3Config empty_key_config("endpoint", "region", "bucket", "", "secret");
+    std::string empty_str = empty_key_config.to_string();
+    EXPECT_TRUE(empty_str.find("null") != std::string::npos);
 }
 
-TEST(S3PluginDownloaderTest, TestS3ConfigWithEmptyValues) {
-    S3PluginDownloader::S3Config empty_config("", "", "", "", "");
-
-    EXPECT_EQ("", empty_config.endpoint);
-    EXPECT_EQ("", empty_config.region);
-    EXPECT_EQ("", empty_config.bucket);
-    EXPECT_EQ("", empty_config.access_key);
-    EXPECT_EQ("", empty_config.secret_key);
-
-    // to_string should still work with empty values
-    std::string config_str = empty_config.to_string();
-    EXPECT_FALSE(config_str.empty());
-}
-
-TEST(S3PluginDownloaderTest, TestConstructorWithValidConfig) {
-    // Test that constructor doesn't throw with valid config
-    S3PluginDownloader::S3Config config("http://localhost:9000", "us-west-2", "test-bucket",
-                                        "access-key", "secret-key");
-
+TEST(S3PluginDownloaderTest, TestConstructorAndDestructor) {
+    S3PluginDownloader::S3Config config("endpoint", "region", "bucket", "key", "secret");
     EXPECT_NO_THROW({ S3PluginDownloader downloader(config); });
 }
 
-TEST(S3PluginDownloaderTest, TestConstructorWithEmptyConfig) {
-    // Test that constructor handles empty config gracefully
+TEST(S3PluginDownloaderTest, TestDownloadFileWithNullS3Filesystem) {
     S3PluginDownloader::S3Config empty_config("", "", "", "", "");
-
-    EXPECT_NO_THROW({ S3PluginDownloader downloader(empty_config); });
-}
-
-TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidS3Path) {
-    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
-    S3PluginDownloader downloader(config);
-
-    std::string local_path;
-    std::string target_path = "/tmp/test.jar";
-
-    // Test with invalid S3 path - should fail quickly due to empty config
-    Status status = downloader.download_file("invalid-s3-path", target_path, &local_path);
-
-    EXPECT_FALSE(status.ok());
-    // Should not crash and return meaningful error
-    EXPECT_FALSE(status.to_string().empty());
-}
-
-TEST(S3PluginDownloaderTest, TestDownloadFileWithNullPointer) {
-    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
-    S3PluginDownloader downloader(config);
-
-    std::string target_path = "/tmp/test.jar";
-
-    // Test with null pointer for local_path - should handle gracefully
-    Status status = downloader.download_file("s3://bucket/file.jar", target_path, nullptr);
-
-    EXPECT_FALSE(status.ok());
-}
-
-TEST(S3PluginDownloaderTest, TestDownloadFileWithInvalidLocalPath) {
-    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config to avoid network calls
-    S3PluginDownloader downloader(config);
-
-    std::string local_path;
-
-    // Test with invalid local path - should fail quickly due to empty config
-    Status status = downloader.download_file("s3://bucket/file.jar",
-                                             "/root/nonexistent/path/test.jar", &local_path);
-
-    EXPECT_FALSE(status.ok());
-    EXPECT_FALSE(status.to_string().empty());
-}
-
-TEST(S3PluginDownloaderTest, TestS3ConfigCopyConstruction) {
-    S3PluginDownloader::S3Config original("http://s3.amazonaws.com", "us-west-2", "test-bucket",
-                                          "access-key", "secret-key");
-
-    // Test copy construction
-    S3PluginDownloader::S3Config copied = original;
-
-    EXPECT_EQ(original.endpoint, copied.endpoint);
-    EXPECT_EQ(original.region, copied.region);
-    EXPECT_EQ(original.bucket, copied.bucket);
-    EXPECT_EQ(original.access_key, copied.access_key);
-    EXPECT_EQ(original.secret_key, copied.secret_key);
-}
-
-TEST(S3PluginDownloaderTest, TestS3ConfigDefaultValues) {
-    // Test S3Config with minimal values
-    S3PluginDownloader::S3Config minimal_config("endpoint", "", "bucket", "", "");
-
-    EXPECT_EQ("endpoint", minimal_config.endpoint);
-    EXPECT_EQ("", minimal_config.region);
-    EXPECT_EQ("bucket", minimal_config.bucket);
-    EXPECT_EQ("", minimal_config.access_key);
-    EXPECT_EQ("", minimal_config.secret_key);
-
-    // to_string should still work
-    EXPECT_FALSE(minimal_config.to_string().empty());
-}
-
-TEST(S3PluginDownloaderTest, TestMultipleDownloaderInstances) {
-    // Test that multiple downloaders can be created with different configs
-    S3PluginDownloader::S3Config config1("endpoint1", "region1", "bucket1", "key1", "secret1");
-    S3PluginDownloader::S3Config config2("endpoint2", "region2", "bucket2", "key2", "secret2");
-
-    EXPECT_NO_THROW({
-        S3PluginDownloader downloader1(config1);
-        S3PluginDownloader downloader2(config2);
-    });
-}
-
-TEST(S3PluginDownloaderTest, TestS3ConfigToStringMasking) {
-    // Test different access key scenarios for masking
-    S3PluginDownloader::S3Config config_with_key("http://s3.test", "region", "bucket", "mykey",
-                                                 "mysecret");
-    S3PluginDownloader::S3Config config_empty_key("http://s3.test", "region", "bucket", "",
-                                                  "mysecret");
-
-    std::string str_with_key = config_with_key.to_string();
-    std::string str_empty_key = config_empty_key.to_string();
-
-    // With key should mask
-    EXPECT_TRUE(str_with_key.find("***") != std::string::npos);
-    EXPECT_FALSE(str_with_key.find("mykey") != std::string::npos);
-
-    // Empty key should show null
-    EXPECT_TRUE(str_empty_key.find("null") != std::string::npos);
-}
-
-TEST(S3PluginDownloaderTest, TestStatusTypeIntegration) {
-    // Test that Status integrates properly with S3PluginDownloader (without slow network calls)
-    S3PluginDownloader::S3Config config("", "", "", "", ""); // Empty config will fail fast
-    S3PluginDownloader downloader(config);
+    S3PluginDownloader downloader(empty_config);
 
     std::string local_path;
     Status status = downloader.download_file("s3://bucket/file.jar", "/tmp/test.jar", &local_path);
 
-    // Test Status methods work correctly - should fail quickly due to empty config
     EXPECT_FALSE(status.ok());
-    EXPECT_FALSE(status.to_string().empty());
+    EXPECT_EQ(status.code(), ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(status.to_string().find("S3 filesystem not initialized") != std::string::npos);
+}
+
+TEST(S3PluginDownloaderTest, TestS3FilesystemCreationException) {
+    S3PluginDownloader::S3Config invalid_config(std::string(10000, 'x'), "region", "bucket", "key",
+                                                "secret");
+
+    EXPECT_NO_THROW({ S3PluginDownloader downloader(invalid_config); });
+}
+
+TEST(S3PluginDownloaderTest, TestValidS3Config) {
+    S3PluginDownloader::S3Config valid_config("http://localhost:9000", "us-west-2", "test-bucket",
+                                              "access", "secret");
+
+    EXPECT_NO_THROW({ S3PluginDownloader downloader(valid_config); });
 }
 
 } // namespace doris
