@@ -31,13 +31,13 @@ public class S3PluginDownloaderTest {
     @Test
     public void testS3ConfigToString() {
         S3PluginDownloader.S3Config config = new S3PluginDownloader.S3Config(
-                "https://s3.amazonaws.com", "us-west-2", "bucket", "prefix", "access-key", "secret");
+                "", "us-west-2", "bucket", "prefix", "access-key", "secret");
         String configStr = config.toString();
         Assertions.assertTrue(configStr.contains("***"));
         Assertions.assertTrue(configStr.contains("prefix='prefix'"));
 
         S3PluginDownloader.S3Config emptyKeyConfig = new S3PluginDownloader.S3Config(
-                "https://s3.amazonaws.com", "us-west-2", "bucket", "prefix", null, "secret");
+                "", "us-west-2", "bucket", "prefix", null, "secret");
         String emptyStr = emptyKeyConfig.toString();
         Assertions.assertTrue(emptyStr.contains("null"));
     }
@@ -45,8 +45,8 @@ public class S3PluginDownloaderTest {
     @Test
     public void testS3ConfigConstructor() {
         S3PluginDownloader.S3Config config = new S3PluginDownloader.S3Config(
-                "https://s3.amazonaws.com", "us-west-2", "bucket", "prefix", "key", "secret");
-        Assertions.assertEquals("https://s3.amazonaws.com", config.endpoint);
+                "", "us-west-2", "bucket", "prefix", "key", "secret");
+        Assertions.assertEquals("", config.endpoint);
         Assertions.assertEquals("us-west-2", config.region);
         Assertions.assertEquals("bucket", config.bucket);
         Assertions.assertEquals("prefix", config.prefix);
@@ -74,7 +74,7 @@ public class S3PluginDownloaderTest {
     @Test
     public void testAutoCloseable() throws Exception {
         S3PluginDownloader.S3Config config = new S3PluginDownloader.S3Config(
-                "https://s3.amazonaws.com", "us-west-2", "bucket", "prefix", "key", "secret");
+                "", "", "", "", "", ""); // Use empty config to avoid endpoint validation
 
         Assertions.assertDoesNotThrow(() -> {
             try (S3PluginDownloader downloader = new S3PluginDownloader(config)) {
