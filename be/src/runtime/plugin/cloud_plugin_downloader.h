@@ -47,6 +47,8 @@ public:
                                       std::string* local_path);
 
 private:
+    friend class CloudPluginDownloaderTest;
+
     // Convert plugin type to directory name
     static std::string _plugin_type_to_string(PluginType plugin_type);
 };
