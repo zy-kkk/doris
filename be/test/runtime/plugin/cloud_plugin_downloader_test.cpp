@@ -22,6 +22,8 @@
 #include <string>
 
 #include "common/status.h"
+#include "olap/options.h"
+#include "olap/storage_engine.h"
 #include "runtime/exec_env.h"
 
 namespace doris {
@@ -70,12 +72,18 @@ TEST_F(CloudPluginDownloaderTest, TestEmptyPluginName) {
 
 // Test S3 config retrieval failure
 TEST_F(CloudPluginDownloaderTest, TestS3ConfigFailure) {
+    // Set up minimal storage engine to avoid null pointer access
+    ExecEnv::GetInstance()->set_storage_engine(std::make_unique<StorageEngine>(EngineOptions()));
+
     std::string local_path;
     Status status = CloudPluginDownloader::download_from_cloud(
             CloudPluginDownloader::PluginType::JDBC_DRIVERS, "test.jar", "/tmp/test.jar",
             &local_path);
 
     EXPECT_FALSE(status.ok());
+
+    // Clean up
+    ExecEnv::GetInstance()->set_storage_engine(nullptr);
 }
 
 // Test _plugin_type_to_string method
