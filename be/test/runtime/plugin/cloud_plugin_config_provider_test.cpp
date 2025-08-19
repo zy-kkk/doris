@@ -36,74 +36,6 @@
 
 namespace doris {
 
-// Test helper class that mimics the CloudPluginConfigProvider logic
-// but allows us to inject mock data at the storage vault level
-class TestableCloudPluginConfigProvider {
-public:
-    static Status test_get_cloud_s3_config(std::unique_ptr<S3PluginDownloader::S3Config>* s3_config,
-                                           const cloud::StorageVaultInfos& mock_vault_infos,
-                                           bool should_fail_vault_retrieval = false,
-                                           bool should_throw_exception = false) {
-        try {
-            if (should_throw_exception) {
-                throw std::runtime_error("Test exception in vault retrieval");
-            }
-
-            if (should_fail_vault_retrieval) {
-                return Status::InternalError("Mock vault retrieval failure");
-            }
-
-            // Mock the config retrieval
-            S3PluginDownloader::S3Config config("", "", "", "", "", "");
-            Status status = mock_get_default_storage_vault_info(&config, mock_vault_infos);
-            RETURN_IF_ERROR(status);
-
-            // Validation logic from original code (lines 36-41)
-            if (config.bucket.empty() || config.access_key.empty() || config.secret_key.empty()) {
-                return Status::InvalidArgument(
-                        "Incomplete S3 configuration: bucket={}, access_key={}, secret_key={}",
-                        config.bucket, config.access_key.empty() ? "empty" : "***",
-                        config.secret_key.empty() ? "empty" : "***");
-            }
-
-            // Construction logic from original code (lines 43-46)
-            *s3_config = std::make_unique<S3PluginDownloader::S3Config>(
-                    config.endpoint, config.region, config.bucket, config.prefix, config.access_key,
-                    config.secret_key);
-            return Status::OK();
-
-        } catch (const std::exception& e) {
-            // Exception handling logic from original code (lines 85-87)
-            return Status::InternalError("Failed to get default storage vault info: {}", e.what());
-        }
-    }
-
-private:
-    static Status mock_get_default_storage_vault_info(S3PluginDownloader::S3Config* s3_config,
-                                                      const cloud::StorageVaultInfos& vault_infos) {
-        // Empty vault check (lines 64-66)
-        if (vault_infos.empty()) {
-            return Status::NotFound("No storage vault info available");
-        }
-
-        const auto& [vault_name, vault_conf, path_format] = vault_infos[0];
-
-        // S3 config extraction (lines 68-81)
-        if (const S3Conf* s3_conf = std::get_if<S3Conf>(&vault_conf)) {
-            s3_config->endpoint = s3_conf->client_conf.endpoint;
-            s3_config->region = s3_conf->client_conf.region;
-            s3_config->bucket = s3_conf->bucket;
-            s3_config->prefix = s3_conf->prefix;
-            s3_config->access_key = s3_conf->client_conf.ak;
-            s3_config->secret_key = s3_conf->client_conf.sk;
-            return Status::OK();
-        }
-
-        // Non-S3 storage type (line 83)
-        return Status::NotSupported("Only S3-compatible storage is supported for plugin download");
-    }
-};
-
 class CloudPluginConfigProviderTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -142,8 +74,71 @@ protected:
         return hdfs_info;
     }
 
+    // Test helper method that mimics CloudPluginConfigProvider logic with mock data
+    Status TestGetCloudS3Config(std::unique_ptr<S3PluginDownloader::S3Config>* s3_config,
+                                const cloud::StorageVaultInfos& mock_vault_infos,
+                                bool should_fail_vault_retrieval = false,
+                                bool should_throw_exception = false) {
+        try {
+            if (should_throw_exception) {
+                throw std::runtime_error("Test exception in vault retrieval");
+            }
+
+            if (should_fail_vault_retrieval) {
+                return Status::InternalError("Mock vault retrieval failure");
+            }
+
+            // Mock the config retrieval
+            S3PluginDownloader::S3Config config("", "", "", "", "", "");
+            Status status = MockGetDefaultStorageVaultInfo(&config, mock_vault_infos);
+            RETURN_IF_ERROR(status);
+
+            // Validation logic from original code (lines 36-41)
+            if (config.bucket.empty() || config.access_key.empty() || config.secret_key.empty()) {
+                return Status::InvalidArgument(
+                        "Incomplete S3 configuration: bucket={}, access_key={}, secret_key={}",
+                        config.bucket, config.access_key.empty() ? "empty" : "***",
+                        config.secret_key.empty() ? "empty" : "***");
+            }
+
+            // Construction logic from original code (lines 43-46)
+            *s3_config = std::make_unique<S3PluginDownloader::S3Config>(
+                    config.endpoint, config.region, config.bucket, config.prefix, config.access_key,
+                    config.secret_key);
+            return Status::OK();
+
+        } catch (const std::exception& e) {
+            // Exception handling logic from original code (lines 85-87)
+            return Status::InternalError("Failed to get default storage vault info: {}", e.what());
+        }
+    }
+
 private:
     bool original_ready_;
+
+    Status MockGetDefaultStorageVaultInfo(S3PluginDownloader::S3Config* s3_config,
+                                          const cloud::StorageVaultInfos& vault_infos) {
+        // Empty vault check (lines 64-66)
+        if (vault_infos.empty()) {
+            return Status::NotFound("No storage vault info available");
+        }
+
+        const auto& [vault_name, vault_conf, path_format] = vault_infos[0];
+
+        // S3 config extraction (lines 68-81)
+        if (const S3Conf* s3_conf = std::get_if<S3Conf>(&vault_conf)) {
+            s3_config->endpoint = s3_conf->client_conf.endpoint;
+            s3_config->region = s3_conf->client_conf.region;
+            s3_config->bucket = s3_conf->bucket;
+            s3_config->prefix = s3_conf->prefix;
+            s3_config->access_key = s3_conf->client_conf.ak;
+            s3_config->secret_key = s3_conf->client_conf.sk;
+            return Status::OK();
+        }
+
+        // Non-S3 storage type (line 83)
+        return Status::NotSupported("Only S3-compatible storage is supported for plugin download");
+    }
 };
 
 // Test 1: Successful S3 config retrieval - covers lines 43-46, 68-81
@@ -154,8 +149,7 @@ TEST_F(CloudPluginConfigProviderTest, TestSuccessfulS3ConfigRetrieval) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_TRUE(status.ok());
     ASSERT_NE(s3_config, nullptr);
@@ -176,8 +170,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptyBucket) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
@@ -194,8 +187,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptyAccessKey) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
@@ -212,8 +204,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptySecretKey) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
@@ -238,8 +229,7 @@ TEST_F(CloudPluginConfigProviderTest, TestEmptyVaultInfos) {
     cloud::StorageVaultInfos empty_vault_infos; // Empty list
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status = TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config,
-                                                                                empty_vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, empty_vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
@@ -254,8 +244,7 @@ TEST_F(CloudPluginConfigProviderTest, TestNonS3StorageVault) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::NOT_IMPLEMENTED_ERROR);
@@ -268,8 +257,8 @@ TEST_F(CloudPluginConfigProviderTest, TestVaultInfoRetrievalFailure) {
     cloud::StorageVaultInfos vault_infos; // This won't be used due to failure
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status = TestableCloudPluginConfigProvider::test_get_cloud_s3_config(
-            &s3_config, vault_infos, true /* should_fail_vault_retrieval */);
+    Status status =
+            TestGetCloudS3Config(&s3_config, vault_infos, true /* should_fail_vault_retrieval */);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INTERNAL_ERROR);
@@ -281,8 +270,8 @@ TEST_F(CloudPluginConfigProviderTest, TestExceptionHandling) {
     cloud::StorageVaultInfos vault_infos;
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status = TestableCloudPluginConfigProvider::test_get_cloud_s3_config(
-            &s3_config, vault_infos, false, true /* should_throw_exception */);
+    Status status =
+            TestGetCloudS3Config(&s3_config, vault_infos, false, true /* should_throw_exception */);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INTERNAL_ERROR);
@@ -302,8 +291,7 @@ TEST_F(CloudPluginConfigProviderTest, TestMultipleCredentialsValidation) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
@@ -321,8 +309,7 @@ TEST_F(CloudPluginConfigProviderTest, TestSuccessfulConfigWithEmptyPrefix) {
                              cloud::StorageVaultPB::PathFormat());
 
     std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status =
-            TestableCloudPluginConfigProvider::test_get_cloud_s3_config(&s3_config, vault_infos);
+    Status status = TestGetCloudS3Config(&s3_config, vault_infos);
 
     EXPECT_TRUE(status.ok());
     ASSERT_NE(s3_config, nullptr);
