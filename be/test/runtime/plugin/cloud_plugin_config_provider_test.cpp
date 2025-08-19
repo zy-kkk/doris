@@ -33,32 +33,16 @@ namespace doris {
 
 class CloudPluginConfigProviderTest : public testing::Test {
 protected:
-    void SetUp() override {
-        original_ready_ = ExecEnv::ready();
-        if (!original_ready_) {
-            ExecEnv::GetInstance()->set_ready();
-        }
-    }
-
-    void TearDown() override {
-        if (!original_ready_) {
-            ExecEnv::GetInstance()->set_not_ready();
-        }
-        ExecEnv::GetInstance()->set_storage_engine(nullptr);
-    }
+    void TearDown() override { ExecEnv::GetInstance()->set_storage_engine(nullptr); }
 
     void SetupRegularStorageEngine() {
-        doris::EngineOptions options;
-        auto engine = std::make_unique<StorageEngine>(options);
-        std::unique_ptr<BaseStorageEngine> base_engine(engine.release());
-        ExecEnv::GetInstance()->set_storage_engine(std::move(base_engine));
+        ExecEnv::GetInstance()->set_storage_engine(
+                std::make_unique<StorageEngine>(EngineOptions()));
     }
 
     void SetupCloudStorageEngine() {
-        doris::EngineOptions options;
-        auto cloud_engine = std::make_unique<CloudStorageEngine>(options);
-        std::unique_ptr<BaseStorageEngine> base_engine(cloud_engine.release());
-        ExecEnv::GetInstance()->set_storage_engine(std::move(base_engine));
+        ExecEnv::GetInstance()->set_storage_engine(
+                std::make_unique<CloudStorageEngine>(EngineOptions()));
     }
 
     void TestConfigValidation(const std::string& bucket, const std::string& ak,
@@ -77,9 +61,6 @@ protected:
             EXPECT_TRUE(error_msg.find("Incomplete S3 configuration") != std::string::npos);
         }
     }
-
-private:
-    bool original_ready_;
 };
 
 // Test non-cloud environment

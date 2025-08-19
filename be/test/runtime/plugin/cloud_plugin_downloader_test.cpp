@@ -22,10 +22,13 @@
 #include <string>
 
 #include "common/status.h"
+#include "runtime/exec_env.h"
 
 namespace doris {
 
-class CloudPluginDownloaderTest : public testing::Test {};
+class CloudPluginDownloaderTest : public testing::Test {
+    // Simple tests, most don't need ExecEnv setup
+};
 
 // Test unsupported plugin types
 TEST_F(CloudPluginDownloaderTest, TestUnsupportedPluginTypes) {
