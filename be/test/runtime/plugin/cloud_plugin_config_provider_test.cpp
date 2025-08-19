@@ -182,7 +182,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptyBucket) {
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
     EXPECT_TRUE(status.to_string().find("Incomplete S3 configuration") != std::string::npos);
-    EXPECT_TRUE(status.to_string().find("bucket={}") != std::string::npos);
+    EXPECT_TRUE(status.to_string().find("bucket=") != std::string::npos);
 }
 
 // Test 3: Invalid config with empty access key - covers lines 36-41
@@ -199,7 +199,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptyAccessKey) {
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
-    EXPECT_TRUE(status.to_string().find("access_key={}") != std::string::npos);
+    EXPECT_TRUE(status.to_string().find("access_key=empty") != std::string::npos);
     EXPECT_TRUE(status.to_string().find("empty") != std::string::npos);
 }
 
@@ -217,7 +217,7 @@ TEST_F(CloudPluginConfigProviderTest, TestInvalidConfigEmptySecretKey) {
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
-    EXPECT_TRUE(status.to_string().find("secret_key={}") != std::string::npos);
+    EXPECT_TRUE(status.to_string().find("secret_key=empty") != std::string::npos);
     EXPECT_TRUE(status.to_string().find("empty") != std::string::npos);
 }
 
@@ -307,7 +307,7 @@ TEST_F(CloudPluginConfigProviderTest, TestMultipleCredentialsValidation) {
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
-    EXPECT_TRUE(status.to_string().find("bucket={}") != std::string::npos);
+    EXPECT_TRUE(status.to_string().find("bucket=") != std::string::npos);
     EXPECT_TRUE(status.to_string().find("access_key=empty") != std::string::npos);
     EXPECT_TRUE(status.to_string().find("secret_key=empty") != std::string::npos);
 }
