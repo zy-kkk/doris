@@ -36,8 +36,8 @@ public:
 private:
     friend class CloudPluginConfigProviderTest;
 
-    // Get default storage vault info using CloudMetaMgr
-    static Status _get_default_storage_vault_info(S3PluginDownloader::S3Config* s3_config);
+    // Get storage vault info using CloudMetaMgr
+    static Status _get_storage_vault_info(S3PluginDownloader::S3Config* s3_config);
 };
 
 } // namespace doris

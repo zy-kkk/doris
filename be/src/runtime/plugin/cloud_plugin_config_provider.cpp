@@ -30,7 +30,7 @@ namespace doris {
 Status CloudPluginConfigProvider::get_cloud_s3_config(
         std::unique_ptr<S3PluginDownloader::S3Config>* s3_config) {
     S3PluginDownloader::S3Config config("", "", "", "", "", "");
-    Status status = _get_default_storage_vault_info(&config);
+    Status status = _get_storage_vault_info(&config);
     RETURN_IF_ERROR(status);
 
     if (config.bucket.empty() || config.access_key.empty() || config.secret_key.empty()) {
@@ -46,27 +46,25 @@ Status CloudPluginConfigProvider::get_cloud_s3_config(
     return Status::OK();
 }
 
-Status CloudPluginConfigProvider::_get_default_storage_vault_info(
-        S3PluginDownloader::S3Config* s3_config) {
-    try {
-        BaseStorageEngine& base_engine = ExecEnv::GetInstance()->storage_engine();
-        CloudStorageEngine* cloud_engine = dynamic_cast<CloudStorageEngine*>(&base_engine);
-        if (!cloud_engine) {
-            return Status::NotFound("CloudStorageEngine not found, not in cloud mode");
-        }
+Status CloudPluginConfigProvider::_get_storage_vault_info(S3PluginDownloader::S3Config* s3_config) {
+    BaseStorageEngine& base_engine = ExecEnv::GetInstance()->storage_engine();
+    CloudStorageEngine* cloud_engine = dynamic_cast<CloudStorageEngine*>(&base_engine);
+    if (!cloud_engine) {
+        return Status::NotFound("CloudStorageEngine not found, not in cloud mode");
+    }
 
-        cloud::CloudMetaMgr& meta_mgr = cloud_engine->meta_mgr();
+    cloud::CloudMetaMgr& meta_mgr = cloud_engine->meta_mgr();
 
-        cloud::StorageVaultInfos vault_infos;
-        bool is_vault_mode = false;
-        RETURN_IF_ERROR(meta_mgr.get_storage_vault_info(&vault_infos, &is_vault_mode));
+    cloud::StorageVaultInfos vault_infos;
+    bool enable_storage_vault = false;
+    RETURN_IF_ERROR(meta_mgr.get_storage_vault_info(&vault_infos, &enable_storage_vault));
 
-        if (vault_infos.empty()) {
-            return Status::NotFound("No storage vault info available");
-        }
+    if (vault_infos.empty()) {
+        return Status::NotFound("No storage vault info available");
+    }
 
-        const auto& [vault_name, vault_conf, path_format] = vault_infos[0];
-
+    // Find first S3-compatible storage vault for plugin download
+    for (const auto& [vault_id, vault_conf, path_format] : vault_infos) {
         if (const S3Conf* s3_conf = std::get_if<S3Conf>(&vault_conf)) {
             s3_config->endpoint = s3_conf->client_conf.endpoint;
             s3_config->region = s3_conf->client_conf.region;
@@ -75,16 +73,12 @@ Status CloudPluginConfigProvider::_get_default_storage_vault_info(
             s3_config->access_key = s3_conf->client_conf.ak;
             s3_config->secret_key = s3_conf->client_conf.sk;
 
-            LOG(INFO) << "Using storage vault for plugin download: " << vault_name
+            LOG(INFO) << "Using storage vault for plugin download: " << vault_id
                       << ", prefix: " << s3_conf->prefix;
             return Status::OK();
         }
-
-        return Status::NotSupported("Only S3-compatible storage is supported for plugin download");
-
-    } catch (const std::exception& e) {
-        return Status::InternalError("Failed to get default storage vault info: {}", e.what());
     }
+    return Status::NotSupported("No S3-compatible storage found for plugin download");
 }
 
 } // namespace doris

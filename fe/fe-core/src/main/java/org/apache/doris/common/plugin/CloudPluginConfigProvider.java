@@ -17,11 +17,8 @@
 
 package org.apache.doris.common.plugin;
 
-import org.apache.doris.catalog.Env;
 import org.apache.doris.cloud.proto.Cloud;
 import org.apache.doris.cloud.rpc.MetaServiceProxy;
-import org.apache.doris.common.Config;
-import org.apache.doris.common.Pair;
 import org.apache.doris.rpc.RpcException;
 
 import com.google.common.base.Strings;
@@ -46,7 +43,7 @@ public class CloudPluginConfigProvider {
      * @throws RuntimeException if configuration retrieval fails
      */
     public static S3PluginDownloader.S3Config getCloudS3Config() {
-        Cloud.ObjectStoreInfoPB objInfo = getDefaultStorageVaultInfo();
+        Cloud.ObjectStoreInfoPB objInfo = getStorageVaultInfo();
 
         if (Strings.isNullOrEmpty(objInfo.getBucket())
                 || Strings.isNullOrEmpty(objInfo.getAk())
@@ -69,53 +66,21 @@ public class CloudPluginConfigProvider {
     // ======================== Private Helper Methods ========================
 
     /**
-     * Get default storage configuration info - using StorageVaultMgr
-     * This method is copied from the working version you provided, more stable and reliable
+     * Get storage configuration info for both SaaS and Vault modes
+     * Uses the existing MetaServiceProxy.getObjStoreInfo() method directly
      */
-    private static Cloud.ObjectStoreInfoPB getDefaultStorageVaultInfo() {
-        // Get default storage vault info from StorageVaultMgr
-        Pair<String, String> defaultVault = Env.getCurrentEnv().getStorageVaultMgr().getDefaultStorageVault();
-        if (defaultVault == null) {
-            throw new RuntimeException("No default storage vault configured for plugin downloader");
-        }
-
-        String vaultName = defaultVault.first;
-
-        // Use the dedicated RPC to get storage vault object store information
-        Cloud.GetObjStoreInfoRequest request = Cloud.GetObjStoreInfoRequest.newBuilder()
-                .setCloudUniqueId(Config.cloud_unique_id)
-                .build();
-
-        Cloud.GetObjStoreInfoResponse response;
+    private static Cloud.ObjectStoreInfoPB getStorageVaultInfo() {
         try {
-            response = MetaServiceProxy.getInstance().getObjStoreInfo(request);
-        } catch (RpcException e) {
-            throw new RuntimeException("Failed to get storage vault info: " + e.getMessage());
-        }
-
-        if (response.getStatus().getCode() != Cloud.MetaServiceCode.OK) {
-            throw new RuntimeException("Failed to get storage vault info: " + response.getStatus().getMsg());
-        }
-
-        // Find the default storage vault in the response
-        for (Cloud.StorageVaultPB vault : response.getStorageVaultList()) {
-            if (vaultName.equals(vault.getName())) {
+            Cloud.GetObjStoreInfoResponse response =
+                    MetaServiceProxy.getInstance().getObjStoreInfo(Cloud.GetObjStoreInfoRequest.newBuilder().build());
+            for (Cloud.StorageVaultPB vault : response.getStorageVaultList()) {
                 if (vault.hasObjInfo()) {
                     return vault.getObjInfo();
-                } else {
-                    throw new RuntimeException("Storage vault " + vaultName + " does not have object store info");
                 }
             }
+            throw new RuntimeException("Failed to get obj store info");
+        } catch (RpcException e) {
+            throw new RuntimeException("Failed to get obj store info: " + e.getMessage());
         }
-
-        // If not found by name, try to use the first available vault
-        if (!response.getStorageVaultList().isEmpty()) {
-            Cloud.StorageVaultPB firstVault = response.getStorageVaultList().get(0);
-            if (firstVault.hasObjInfo()) {
-                return firstVault.getObjInfo();
-            }
-        }
-
-        throw new RuntimeException("No suitable storage vault found for plugin download");
     }
 }

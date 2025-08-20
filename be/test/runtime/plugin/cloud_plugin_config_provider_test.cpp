@@ -94,12 +94,12 @@ TEST_F(CloudPluginConfigProviderTest, TestConfigValidation) {
     TestConfigValidation("", "", "", false);
 }
 
-// Test _get_default_storage_vault_info private method
-TEST_F(CloudPluginConfigProviderTest, TestGetDefaultStorageVaultInfoNonCloud) {
+// Test _get_storage_vault_info private method
+TEST_F(CloudPluginConfigProviderTest, TestGetStorageVaultInfoNonCloud) {
     SetupRegularStorageEngine();
 
     S3PluginDownloader::S3Config config("", "", "", "", "", "");
-    Status status = CloudPluginConfigProvider::_get_default_storage_vault_info(&config);
+    Status status = CloudPluginConfigProvider::_get_storage_vault_info(&config);
 
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
@@ -107,11 +107,11 @@ TEST_F(CloudPluginConfigProviderTest, TestGetDefaultStorageVaultInfoNonCloud) {
 }
 
 // Test private method in cloud environment
-TEST_F(CloudPluginConfigProviderTest, TestGetDefaultStorageVaultInfoCloud) {
+TEST_F(CloudPluginConfigProviderTest, TestGetStorageVaultInfoCloud) {
     SetupCloudStorageEngine();
 
     S3PluginDownloader::S3Config config("", "", "", "", "", "");
-    Status status = CloudPluginConfigProvider::_get_default_storage_vault_info(&config);
+    Status status = CloudPluginConfigProvider::_get_storage_vault_info(&config);
 
     EXPECT_FALSE(status.ok());
 }
