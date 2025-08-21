@@ -101,12 +101,9 @@ Status CloudPluginDownloader::_prepare_local_path(const std::string& local_path)
     }
 
     // Ensure local directory exists
-    size_t last_slash = local_path.find_last_of('/');
-    if (last_slash != std::string::npos) {
-        std::string dir_path = local_path.substr(0, last_slash);
-        if (!dir_path.empty()) {
-            RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(dir_path));
-        }
+    std::string dir_path = local_path.substr(0, local_path.find_last_of('/'));
+    if (!dir_path.empty()) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(dir_path));
     }
 
     return Status::OK();

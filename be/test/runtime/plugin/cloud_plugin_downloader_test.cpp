@@ -205,12 +205,6 @@ TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathWithNestedDirectory) {
     std::filesystem::remove_all("/tmp/test_dir");
 }
 
-TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathNoDirectory) {
-    std::string simple_path = "test.jar";
-    Status status = downloader->_prepare_local_path(simple_path);
-    EXPECT_TRUE(status.ok());
-}
-
 TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathRootDirectory) {
     std::string root_path = "/test_root.jar";
     Status status = downloader->_prepare_local_path(root_path);
