@@ -104,14 +104,14 @@ TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathUnsupportedTypes) {
     Status status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::CONNECTORS,
                                                    "kafka-connector.jar", &path);
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
 
     // Test HADOOP_CONF type - should return error
     status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::HADOOP_CONF,
                                             "core-site.xml", &path);
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
 }
 
@@ -122,7 +122,7 @@ TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathInvalidType) {
     std::string path;
     Status status = downloader->_build_plugin_path(invalid_type, "test.jar", &path);
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
 }
 
