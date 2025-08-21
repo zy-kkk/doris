@@ -137,7 +137,7 @@ TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudEmptyName) {
             "/tmp/test.jar", &result_path);
 
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is<ErrorCode::INVALID_ARGUMENT>());
+    EXPECT_EQ(status.code(), ErrorCode::INVALID_ARGUMENT);
     EXPECT_EQ("Plugin name cannot be empty", status.msg());
 }
 
@@ -152,7 +152,7 @@ TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudRegularStorageEngine) {
             &result_path);
 
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+    EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
     EXPECT_TRUE(status.to_string().find("CloudStorageEngine not found") != std::string::npos);
 }
 
@@ -165,17 +165,20 @@ TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemNonCloudEnvironment) {
     Status status = downloader->_get_cloud_filesystem(&filesystem);
 
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+    EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
     EXPECT_TRUE(status.to_string().find("CloudStorageEngine not found") != std::string::npos);
 }
 
 TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemNoStorageEngine) {
     // Negative test: no storage engine
+    // First set up a regular storage engine (to avoid crash)
+    SetupRegularStorageEngine();
+
     io::RemoteFileSystemSPtr filesystem;
     Status status = downloader->_get_cloud_filesystem(&filesystem);
 
     EXPECT_FALSE(status.ok());
-    EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+    EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
 }
 
 TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemCloudEnvironment) {
@@ -189,7 +192,7 @@ TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemCloudEnvironment) {
     // This depends on the actual CloudStorageEngine implementation
     // We expect it to fail at the filesystem level, not the engine detection level
     if (!status.ok()) {
-        EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+        EXPECT_EQ(status.code(), ErrorCode::NOT_FOUND);
         EXPECT_TRUE(status.to_string().find("No latest filesystem available") != std::string::npos);
     }
 }
