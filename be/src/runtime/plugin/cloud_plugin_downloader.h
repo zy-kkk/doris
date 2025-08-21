@@ -17,40 +17,50 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "common/status.h"
 
+namespace doris::io {
+class RemoteFileSystem;
+using RemoteFileSystemSPtr = std::shared_ptr<RemoteFileSystem>;
+} // namespace doris::io
+
 namespace doris {
 
 /**
- * CloudPluginDownloader is the unified entry point for plugin downloads in cloud mode.
- * 
- * Architecture:
- * 1. CloudPluginConfigProvider - Get S3 config from cloud mode
- * 2. S3PluginDownloader - Execute S3 downloads
- * 3. CloudPluginDownloader - Simple unified API
+ * Cloud plugin downloader with testable design
+ * Uses friend class pattern for easy unit testing
  */
 class CloudPluginDownloader {
 public:
-    // Plugin type enumeration
-    enum class PluginType {
-        JDBC_DRIVERS, // JDBC driver jar files
-        JAVA_UDF,     // Java UDF jar files
-        CONNECTORS,   // Trino connector tar.gz packages
-        HADOOP_CONF   // Hadoop configuration files
-    };
+    enum class PluginType { JDBC_DRIVERS, JAVA_UDF, CONNECTORS, HADOOP_CONF };
 
-    // Download plugin from cloud storage
-    static Status download_from_cloud(PluginType plugin_type, const std::string& plugin_name,
-                                      const std::string& local_target_path,
-                                      std::string* local_path);
+    /**
+     * Download plugin from cloud storage to local path
+     */
+    static Status download_from_cloud(PluginType type, const std::string& name,
+                                      const std::string& local_path, std::string* result_path);
 
 private:
     friend class CloudPluginDownloaderTest;
 
-    // Convert plugin type to directory name
-    static std::string _plugin_type_to_string(PluginType plugin_type);
+    // Build remote plugin path: plugins/{type}/{name}
+    std::string _build_plugin_path(PluginType type, const std::string& name);
+
+    // Get plugin type directory name
+    std::string _get_type_path_segment(PluginType type);
+
+    // Get cloud filesystem
+    Status _get_cloud_filesystem(io::RemoteFileSystemSPtr* filesystem);
+
+    // Prepare local environment (remove existing file, create directory)
+    Status _prepare_local_path(const std::string& local_path);
+
+    // High-performance file download using 10MB buffer
+    Status _download_remote_file(io::RemoteFileSystemSPtr remote_fs, const std::string& remote_path,
+                                 const std::string& local_path);
 };
 
 } // namespace doris

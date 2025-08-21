@@ -19,42 +19,51 @@
 
 #include <fmt/format.h>
 
-#include "common/status.h"
-#include "runtime/plugin/cloud_plugin_config_provider.h"
+#include "cloud/cloud_storage_engine.h"
+#include "io/fs/local_file_system.h"
+#include "io/fs/remote_file_system.h"
+#include "runtime/exec_env.h"
 
 namespace doris {
 
-Status CloudPluginDownloader::download_from_cloud(PluginType plugin_type,
-                                                  const std::string& plugin_name,
-                                                  const std::string& local_target_path,
-                                                  std::string* local_path) {
-    // Check supported plugin types first
-    if (plugin_type != PluginType::JDBC_DRIVERS && plugin_type != PluginType::JAVA_UDF) {
-        return Status::InvalidArgument("Unsupported plugin type for cloud download: {}",
-                                       _plugin_type_to_string(plugin_type));
+// Use 10MB buffer for all downloads - same as cloud_warm_up_manager
+static constexpr size_t DOWNLOAD_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB
+
+Status CloudPluginDownloader::download_from_cloud(PluginType type, const std::string& name,
+                                                  const std::string& local_path,
+                                                  std::string* result_path) {
+    if (name.empty()) {
+        return Status::InvalidArgument("Plugin name cannot be empty");
     }
 
-    if (plugin_name.empty()) {
-        return Status::InvalidArgument("plugin_name cannot be empty");
-    }
+    CloudPluginDownloader downloader;
 
-    // 1. Get cloud configuration and build S3 path
-    std::unique_ptr<S3PluginDownloader::S3Config> s3_config;
-    Status status = CloudPluginConfigProvider::get_cloud_s3_config(&s3_config);
-    RETURN_IF_ERROR(status);
+    // 1. Get FileSystem
+    io::RemoteFileSystemSPtr filesystem;
+    RETURN_IF_ERROR(downloader._get_cloud_filesystem(&filesystem));
 
-    // 2. Direct path construction using prefix from s3_config
-    std::string s3_path =
-            fmt::format("s3://{}/{}/plugins/{}/{}", s3_config->bucket, s3_config->prefix,
-                        _plugin_type_to_string(plugin_type), plugin_name);
+    // 2. Build remote plugin path
+    std::string remote_path = downloader._build_plugin_path(type, name);
+    LOG(INFO) << "Downloading plugin: " << remote_path << " -> " << local_path;
 
-    // 3. Execute download
-    S3PluginDownloader downloader(*s3_config);
-    return downloader.download_file(s3_path, local_target_path, local_path);
+    // 3. Prepare local environment
+    RETURN_IF_ERROR(downloader._prepare_local_path(local_path));
+
+    // 4. Download remote file to local
+    RETURN_IF_ERROR(downloader._download_remote_file(filesystem, remote_path, local_path));
+
+    *result_path = local_path;
+    LOG(INFO) << "Successfully downloaded plugin: " << remote_path << " to " << local_path;
+
+    return Status::OK();
 }
 
-std::string CloudPluginDownloader::_plugin_type_to_string(PluginType plugin_type) {
-    switch (plugin_type) {
+std::string CloudPluginDownloader::_build_plugin_path(PluginType type, const std::string& name) {
+    return fmt::format("plugins/{}/{}", _get_type_path_segment(type), name);
+}
+
+std::string CloudPluginDownloader::_get_type_path_segment(PluginType type) {
+    switch (type) {
     case PluginType::JDBC_DRIVERS:
         return "jdbc_drivers";
     case PluginType::JAVA_UDF:
@@ -66,6 +75,70 @@ std::string CloudPluginDownloader::_plugin_type_to_string(PluginType plugin_type
     default:
         return "unknown";
     }
+}
+
+Status CloudPluginDownloader::_get_cloud_filesystem(io::RemoteFileSystemSPtr* filesystem) {
+    BaseStorageEngine& base_engine = ExecEnv::GetInstance()->storage_engine();
+    CloudStorageEngine* cloud_engine = dynamic_cast<CloudStorageEngine*>(&base_engine);
+    if (!cloud_engine) {
+        return Status::NotFound("CloudStorageEngine not found, not in cloud mode");
+    }
+
+    *filesystem = cloud_engine->latest_fs();
+    if (!*filesystem) {
+        return Status::NotFound("No latest filesystem available in cloud mode");
+    }
+
+    return Status::OK();
+}
+
+Status CloudPluginDownloader::_prepare_local_path(const std::string& local_path) {
+    // Remove existing file if present
+    bool exists = false;
+    RETURN_IF_ERROR(io::global_local_filesystem()->exists(local_path, &exists));
+    if (exists) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->delete_file(local_path));
+        LOG(INFO) << "Removed existing file: " << local_path;
+    }
+
+    // Ensure local directory exists
+    std::string dir_path = local_path.substr(0, local_path.find_last_of('/'));
+    if (!dir_path.empty()) {
+        RETURN_IF_ERROR(io::global_local_filesystem()->create_directory(dir_path));
+    }
+
+    return Status::OK();
+}
+
+Status CloudPluginDownloader::_download_remote_file(io::RemoteFileSystemSPtr filesystem,
+                                                    const std::string& remote_path,
+                                                    const std::string& local_path) {
+    // Open remote file for reading
+    io::FileReaderSPtr remote_reader;
+    io::FileReaderOptions opts;
+    RETURN_IF_ERROR(filesystem->open_file(remote_path, &remote_reader, &opts));
+
+    // Get file size
+    int64_t file_size;
+    RETURN_IF_ERROR(filesystem->file_size(remote_path, &file_size));
+
+    // Create local file writer
+    io::FileWriterPtr local_writer;
+    RETURN_IF_ERROR(io::global_local_filesystem()->create_file(local_path, &local_writer));
+
+    auto buffer = std::make_unique<char[]>(DOWNLOAD_BUFFER_SIZE);
+    size_t total_read = 0;
+    while (total_read < file_size) {
+        size_t to_read =
+                std::min(DOWNLOAD_BUFFER_SIZE, static_cast<size_t>(file_size - total_read));
+        size_t bytes_read;
+        RETURN_IF_ERROR(remote_reader->read_at(total_read, {buffer.get(), to_read}, &bytes_read));
+        RETURN_IF_ERROR(local_writer->append({buffer.get(), bytes_read}));
+        total_read += bytes_read;
+    }
+
+    RETURN_IF_ERROR(local_writer->close());
+    return Status::OK();
 }
 
 } // namespace doris

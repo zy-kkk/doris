@@ -17,68 +17,143 @@
 
 package org.apache.doris.common.plugin;
 
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
+import org.apache.doris.cloud.proto.Cloud;
+import org.apache.doris.cloud.rpc.MetaServiceProxy;
+import org.apache.doris.common.plugin.CloudPluginDownloader.PluginType;
 
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+
+import java.util.Collections;
+
+/**
+ * Unit tests for CloudPluginDownloader using package-private methods for direct white-box testing.
+ */
 public class CloudPluginDownloaderTest {
 
-    @Test
-    public void testUnsupportedPluginTypes() {
-        // Test CONNECTORS (unsupported)
-        RuntimeException exception1 = Assertions.assertThrows(RuntimeException.class, () -> {
-            CloudPluginDownloader.downloadFromCloud(
-                    CloudPluginDownloader.PluginType.CONNECTORS, "connector.jar", "/tmp/connector.jar");
-        });
-        Assertions.assertTrue(exception1.getMessage().contains("Unsupported plugin type"));
+    private Cloud.GetObjStoreInfoResponse mockResponse;
+    private Cloud.ObjectStoreInfoPB mockObjInfo;
+    private MetaServiceProxy mockMetaServiceProxy;
 
-        // Test HADOOP_CONF (unsupported)
-        RuntimeException exception2 = Assertions.assertThrows(RuntimeException.class, () -> {
-            CloudPluginDownloader.downloadFromCloud(
-                    CloudPluginDownloader.PluginType.HADOOP_CONF, "core-site.xml", "/tmp/conf.xml");
-        });
-        Assertions.assertTrue(exception2.getMessage().contains("Unsupported plugin type"));
+    @BeforeEach
+    void setUp() {
+        mockResponse = Mockito.mock(Cloud.GetObjStoreInfoResponse.class);
+        mockObjInfo = Mockito.mock(Cloud.ObjectStoreInfoPB.class);
+        mockMetaServiceProxy = Mockito.mock(MetaServiceProxy.class);
     }
 
-    @Test
-    public void testPluginNameValidation() {
-        // Test empty string
-        RuntimeException exception1 = Assertions.assertThrows(RuntimeException.class, () -> {
-            CloudPluginDownloader.downloadFromCloud(
-                    CloudPluginDownloader.PluginType.JAVA_UDF, "", "/tmp/test.jar");
-        });
-        Assertions.assertTrue(exception1.getMessage().contains("pluginName cannot be null or empty"));
+    // ============== validateInput Tests ==============
 
-        // Test null
-        RuntimeException exception2 = Assertions.assertThrows(RuntimeException.class, () -> {
-            CloudPluginDownloader.downloadFromCloud(
-                    CloudPluginDownloader.PluginType.JAVA_UDF, null, "/tmp/test.jar");
+    @Test
+    void testValidateInput() {
+        // Positive cases
+        Assertions.assertDoesNotThrow(() -> {
+            CloudPluginDownloader.validateInput(PluginType.JDBC_DRIVERS, "mysql.jar");
+            CloudPluginDownloader.validateInput(PluginType.JAVA_UDF, "my_udf.jar");
         });
-        Assertions.assertTrue(exception2.getMessage().contains("pluginName cannot be null or empty"));
+
+        // Empty/null name
+        IllegalArgumentException ex1 = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> CloudPluginDownloader.validateInput(PluginType.JDBC_DRIVERS, ""));
+        Assertions.assertEquals("Plugin name cannot be empty", ex1.getMessage());
+
+        IllegalArgumentException ex2 = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> CloudPluginDownloader.validateInput(PluginType.JDBC_DRIVERS, null));
+        Assertions.assertEquals("Plugin name cannot be empty", ex2.getMessage());
+
+        // Unsupported types
+        UnsupportedOperationException ex3 = Assertions.assertThrows(UnsupportedOperationException.class,
+                () -> CloudPluginDownloader.validateInput(PluginType.CONNECTORS, "test.jar"));
+        Assertions.assertTrue(ex3.getMessage().contains("is not supported yet"));
     }
 
+    // ============== getCloudStorageInfo Tests ==============
+
     @Test
-    public void testGetDirectoryName() {
-        Assertions.assertEquals("jdbc_drivers", CloudPluginDownloader.PluginType.JDBC_DRIVERS.getDirectoryName());
-        Assertions.assertEquals("java_udf", CloudPluginDownloader.PluginType.JAVA_UDF.getDirectoryName());
-        Assertions.assertEquals("connectors", CloudPluginDownloader.PluginType.CONNECTORS.getDirectoryName());
-        Assertions.assertEquals("hadoop_conf", CloudPluginDownloader.PluginType.HADOOP_CONF.getDirectoryName());
+    void testGetCloudStorageInfo() throws Exception {
+        try (MockedStatic<MetaServiceProxy> mockedStatic = Mockito.mockStatic(MetaServiceProxy.class)) {
+            mockedStatic.when(MetaServiceProxy::getInstance).thenReturn(mockMetaServiceProxy);
+
+            // Success case
+            Cloud.MetaServiceResponseStatus okStatus = Cloud.MetaServiceResponseStatus.newBuilder()
+                    .setCode(Cloud.MetaServiceCode.OK).build();
+            Mockito.when(mockResponse.getStatus()).thenReturn(okStatus);
+            Mockito.when(mockResponse.getObjInfoList()).thenReturn(Collections.singletonList(mockObjInfo));
+            Mockito.when(mockResponse.getObjInfo(0)).thenReturn(mockObjInfo);
+            Mockito.when(mockMetaServiceProxy.getObjStoreInfo(Mockito.any())).thenReturn(mockResponse);
+
+            Cloud.ObjectStoreInfoPB result = CloudPluginDownloader.getCloudStorageInfo();
+            Assertions.assertEquals(mockObjInfo, result);
+
+            // Error response
+            Cloud.MetaServiceResponseStatus failedStatus = Cloud.MetaServiceResponseStatus.newBuilder()
+                    .setCode(Cloud.MetaServiceCode.INVALID_ARGUMENT).setMsg("Test error").build();
+            Mockito.when(mockResponse.getStatus()).thenReturn(failedStatus);
+
+            RuntimeException ex1 = Assertions.assertThrows(RuntimeException.class,
+                    CloudPluginDownloader::getCloudStorageInfo);
+            Assertions.assertTrue(ex1.getMessage().contains("Failed to get storage info"));
+
+            // Empty storage list
+            Mockito.when(mockResponse.getStatus()).thenReturn(okStatus);
+            Mockito.when(mockResponse.getObjInfoList()).thenReturn(Collections.emptyList());
+
+            RuntimeException ex2 = Assertions.assertThrows(RuntimeException.class,
+                    CloudPluginDownloader::getCloudStorageInfo);
+            Assertions.assertTrue(ex2.getMessage().contains("Only SaaS cloud storage is supported"));
+        }
     }
 
+    // ============== buildS3Path Tests ==============
+
     @Test
-    public void testSupportedPluginTypeDownloadFailure() {
-        // Test that supported types fail at config retrieval in non-cloud environment
-        RuntimeException exception = Assertions.assertThrows(RuntimeException.class, () -> {
-            CloudPluginDownloader.downloadFromCloud(
-                    CloudPluginDownloader.PluginType.JDBC_DRIVERS, "driver.jar", "/tmp/driver.jar");
-        });
+    void testBuildS3Path() {
+        Mockito.when(mockObjInfo.getBucket()).thenReturn("test-bucket");
 
-        // Should fail at config retrieval, not plugin type validation
-        String message = exception.getMessage();
-        boolean isConfigError = message.contains("storage vault")
-                || message.contains("Failed to get")
-                || message.contains("configuration")
-                || message.contains("Failed to download plugin from cloud");
+        // With prefix
+        Mockito.when(mockObjInfo.hasPrefix()).thenReturn(true);
+        Mockito.when(mockObjInfo.getPrefix()).thenReturn("test-prefix");
+        Assertions.assertEquals("s3://test-bucket/test-prefix/plugins/jdbc_drivers/mysql.jar",
+                CloudPluginDownloader.buildS3Path(mockObjInfo, PluginType.JDBC_DRIVERS, "mysql.jar"));
 
-        Assertions.assertTrue(isConfigError, "Expected config-related error, got: " + message);
+        // Without prefix
+        Mockito.when(mockObjInfo.hasPrefix()).thenReturn(false);
+        Assertions.assertEquals("s3://test-bucket/plugins/java_udf/my_udf.jar",
+                CloudPluginDownloader.buildS3Path(mockObjInfo, PluginType.JAVA_UDF, "my_udf.jar"));
+
+        // All plugin types
+        Assertions.assertEquals("s3://test-bucket/plugins/connectors/test.jar",
+                CloudPluginDownloader.buildS3Path(mockObjInfo, PluginType.CONNECTORS, "test.jar"));
+        Assertions.assertEquals("s3://test-bucket/plugins/hadoop_conf/test.xml",
+                CloudPluginDownloader.buildS3Path(mockObjInfo, PluginType.HADOOP_CONF, "test.xml"));
+    }
+
+    // ============== Integration Test ==============
+
+    @Test
+    void testDownloadFromCloudIntegration() {
+        // Basic integration test - should fail early due to validation
+        IllegalArgumentException ex = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> CloudPluginDownloader.downloadFromCloud(PluginType.JDBC_DRIVERS, "", "/tmp/test.jar"));
+        Assertions.assertEquals("Plugin name cannot be empty", ex.getMessage());
+
+        // Should fail at MetaService level (no real cloud environment)
+        RuntimeException ex2 = Assertions.assertThrows(RuntimeException.class,
+                () -> CloudPluginDownloader.downloadFromCloud(PluginType.JDBC_DRIVERS, "mysql.jar", "/tmp/test.jar"));
+        Assertions.assertTrue(ex2.getMessage().contains("Failed to download plugin"));
+    }
+
+    // ============== Enum Tests ==============
+
+    @Test
+    void testPluginTypeEnum() {
+        Assertions.assertEquals("JDBC_DRIVERS", PluginType.JDBC_DRIVERS.name());
+        Assertions.assertEquals("JAVA_UDF", PluginType.JAVA_UDF.name());
+        Assertions.assertEquals("CONNECTORS", PluginType.CONNECTORS.name());
+        Assertions.assertEquals("HADOOP_CONF", PluginType.HADOOP_CONF.name());
+        Assertions.assertEquals(4, PluginType.values().length);
     }
 }
