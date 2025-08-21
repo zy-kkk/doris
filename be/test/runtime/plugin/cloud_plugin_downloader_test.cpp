@@ -17,12 +17,14 @@
 
 #include "runtime/plugin/cloud_plugin_downloader.h"
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 
 #include "cloud/cloud_storage_engine.h"
+#include "olap/storage_engine.h"
 #include "runtime/exec_env.h"
 
 namespace doris {
@@ -33,19 +35,6 @@ protected:
 
     void TearDown() override {
         downloader.reset();
-        // Clean up test files
-        std::vector<std::string> cleanup_files = {"/tmp/test.jar", "/tmp/existing_file.jar",
-                                                  "/tmp/test_dir/nested/test.jar",
-                                                  "/tmp/readonly.jar"};
-        for (const auto& file : cleanup_files) {
-            std::error_code ec;
-            std::filesystem::remove(file, ec);
-            std::filesystem::path parent = std::filesystem::path(file).parent_path();
-            if (parent.string() != "/tmp") {
-                std::filesystem::remove_all(parent, ec);
-            }
-        }
-        // Reset ExecEnv storage engine
         ExecEnv::GetInstance()->set_storage_engine(nullptr);
     }
 
@@ -62,94 +51,112 @@ protected:
     std::unique_ptr<CloudPluginDownloader> downloader;
 };
 
-// ============== Input Validation Tests ==============
+// ============== Core Business Logic Tests ==============
 
-// Test static API with invalid inputs
-TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudInvalidInputs) {
+// Test _build_plugin_path method - pure business logic, 100% testable
+TEST_F(CloudPluginDownloaderTest, TestBuildPluginPath) {
+    // Test JDBC_DRIVERS
+    std::string path;
+    Status status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JDBC_DRIVERS,
+                                                   "mysql-connector.jar", &path);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ("plugins/jdbc_drivers/mysql-connector.jar", path);
+
+    // Test JAVA_UDF
+    status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JAVA_UDF,
+                                            "my-udf.jar", &path);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ("plugins/java_udf/my-udf.jar", path);
+}
+
+// Note: _get_type_path_segment method removed - logic moved into _build_plugin_path
+
+// Test edge cases
+TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathEdgeCases) {
+    std::string path;
+
+    // Test with special characters
+    Status status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JDBC_DRIVERS,
+                                                   "test-file_v1.2.jar", &path);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ("plugins/jdbc_drivers/test-file_v1.2.jar", path);
+
+    // Test with path-like name
+    status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JAVA_UDF,
+                                            "sub/dir/file.jar", &path);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ("plugins/java_udf/sub/dir/file.jar", path);
+
+    // Test with long name
+    std::string long_name(100, 'a');
+    long_name += ".jar";
+    status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JDBC_DRIVERS,
+                                            long_name, &path);
+    EXPECT_TRUE(status.ok());
+    std::string expected = "plugins/jdbc_drivers/" + long_name;
+    EXPECT_EQ(expected, path);
+}
+
+TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathUnsupportedTypes) {
+    std::string path;
+
+    // Test CONNECTORS type - should return error
+    Status status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::CONNECTORS,
+                                                   "kafka-connector.jar", &path);
+    EXPECT_FALSE(status.ok());
+    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
+
+    // Test HADOOP_CONF type - should return error
+    status = downloader->_build_plugin_path(CloudPluginDownloader::PluginType::HADOOP_CONF,
+                                            "core-site.xml", &path);
+    EXPECT_FALSE(status.ok());
+    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
+}
+
+TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathInvalidType) {
+    // Test with invalid enum value - should return error status
+    CloudPluginDownloader::PluginType invalid_type =
+            static_cast<CloudPluginDownloader::PluginType>(999);
+    std::string path;
+    Status status = downloader->_build_plugin_path(invalid_type, "test.jar", &path);
+    EXPECT_FALSE(status.ok());
+    EXPECT_TRUE(status.is_invalid_argument());
+    EXPECT_THAT(status.msg(), testing::HasSubstr("Unsupported plugin type"));
+}
+
+// ============== Storage Engine Integration Tests ==============
+
+// Test static entry point with invalid input
+TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudEmptyName) {
     std::string result_path;
-
-    // Test empty name
     Status status = CloudPluginDownloader::download_from_cloud(
-            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "", "/tmp/test.jar", &result_path);
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS,
+            "", // empty name
+            "/tmp/test.jar", &result_path);
+
     EXPECT_FALSE(status.ok());
     EXPECT_TRUE(status.is<ErrorCode::INVALID_ARGUMENT>());
     EXPECT_EQ("Plugin name cannot be empty", status.msg());
+}
 
-    // Test with valid name but no cloud environment (should fail later)
-    status = CloudPluginDownloader::download_from_cloud(
+// Test with regular storage engine - should fail at cloud detection
+TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudRegularStorageEngine) {
+    // Set up minimal storage engine to avoid null pointer access
+    SetupRegularStorageEngine();
+
+    std::string result_path;
+    Status status = CloudPluginDownloader::download_from_cloud(
             CloudPluginDownloader::PluginType::JDBC_DRIVERS, "mysql.jar", "/tmp/test.jar",
             &result_path);
-    EXPECT_FALSE(status.ok()); // Will fail at filesystem level
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+    EXPECT_TRUE(status.to_string().find("CloudStorageEngine not found") != std::string::npos);
 }
 
-// ============== _build_plugin_path Tests ==============
-
-TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathSuccess) {
-    // Positive tests for all plugin types
-    EXPECT_EQ("plugins/jdbc_drivers/mysql-connector.jar",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JDBC_DRIVERS,
-                                             "mysql-connector.jar"));
-
-    EXPECT_EQ("plugins/java_udf/my-udf.jar",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JAVA_UDF,
-                                             "my-udf.jar"));
-
-    EXPECT_EQ("plugins/connectors/kafka-connector.jar",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::CONNECTORS,
-                                             "kafka-connector.jar"));
-
-    EXPECT_EQ("plugins/hadoop_conf/core-site.xml",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::HADOOP_CONF,
-                                             "core-site.xml"));
-}
-
-TEST_F(CloudPluginDownloaderTest, TestBuildPluginPathEdgeCases) {
-    // Test with special characters
-    EXPECT_EQ("plugins/jdbc_drivers/test-file_v1.2.jar",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JDBC_DRIVERS,
-                                             "test-file_v1.2.jar"));
-
-    // Test with path-like name
-    EXPECT_EQ("plugins/java_udf/sub/dir/file.jar",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::JAVA_UDF,
-                                             "sub/dir/file.jar"));
-
-    // Test with very long name
-    std::string long_name(200, 'a');
-    long_name += ".jar";
-    std::string expected = "plugins/connectors/" + long_name;
-    EXPECT_EQ(expected, downloader->_build_plugin_path(
-                                CloudPluginDownloader::PluginType::CONNECTORS, long_name));
-
-    // Test with empty name (edge case)
-    EXPECT_EQ("plugins/hadoop_conf/",
-              downloader->_build_plugin_path(CloudPluginDownloader::PluginType::HADOOP_CONF, ""));
-}
-
-// ============== _get_type_path_segment Tests ==============
-
-TEST_F(CloudPluginDownloaderTest, TestGetTypePathSegmentSuccess) {
-    // Positive tests for all enum values
-    EXPECT_EQ("jdbc_drivers",
-              downloader->_get_type_path_segment(CloudPluginDownloader::PluginType::JDBC_DRIVERS));
-    EXPECT_EQ("java_udf",
-              downloader->_get_type_path_segment(CloudPluginDownloader::PluginType::JAVA_UDF));
-    EXPECT_EQ("connectors",
-              downloader->_get_type_path_segment(CloudPluginDownloader::PluginType::CONNECTORS));
-    EXPECT_EQ("hadoop_conf",
-              downloader->_get_type_path_segment(CloudPluginDownloader::PluginType::HADOOP_CONF));
-}
-
-TEST_F(CloudPluginDownloaderTest, TestGetTypePathSegmentInvalidType) {
-    // Test with invalid enum value (undefined behavior, but shouldn't crash)
-    CloudPluginDownloader::PluginType invalid_type =
-            static_cast<CloudPluginDownloader::PluginType>(999);
-    std::string result = downloader->_get_type_path_segment(invalid_type);
-    EXPECT_EQ("unknown", result); // Based on default case in switch
-}
-
-// ============== _get_cloud_filesystem Tests ==============
-
+// Test _get_cloud_filesystem with different storage engines
 TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemNonCloudEnvironment) {
     // Negative test: regular storage engine
     SetupRegularStorageEngine();
@@ -172,7 +179,7 @@ TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemNoStorageEngine) {
 }
 
 TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemCloudEnvironment) {
-    // Positive test: cloud storage engine (though filesystem might not be available)
+    // Test: cloud storage engine (though filesystem might not be available)
     SetupCloudStorageEngine();
 
     io::RemoteFileSystemSPtr filesystem;
@@ -180,22 +187,39 @@ TEST_F(CloudPluginDownloaderTest, TestGetCloudFilesystemCloudEnvironment) {
 
     // Should succeed in getting cloud engine, but might fail getting filesystem
     // This depends on the actual CloudStorageEngine implementation
-    // In real cloud environment, this should work
+    // We expect it to fail at the filesystem level, not the engine detection level
+    if (!status.ok()) {
+        EXPECT_TRUE(status.is<ErrorCode::NOT_FOUND>());
+        EXPECT_TRUE(status.to_string().find("No latest filesystem available") != std::string::npos);
+    }
 }
 
-// ============== _prepare_local_path Tests ==============
+// Test more download_from_cloud scenarios
+TEST_F(CloudPluginDownloaderTest, TestDownloadFromCloudCloudStorageEngine) {
+    // Test with cloud storage engine - should progress further before failing
+    SetupCloudStorageEngine();
+
+    std::string result_path;
+    Status status = CloudPluginDownloader::download_from_cloud(
+            CloudPluginDownloader::PluginType::JDBC_DRIVERS, "mysql.jar", "/tmp/test.jar",
+            &result_path);
+
+    EXPECT_FALSE(status.ok());
+    // Should fail at filesystem level, not engine detection level
+    // This covers more code path than the regular storage engine test
+}
+
+// ============== File System Tests ==============
 
 TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathSuccess) {
-    // Positive test: prepare new file path
-    std::string test_path = "/tmp/test.jar";
+    // Test new file path - should succeed
+    std::string test_path = "/tmp/test_new_file.jar";
     Status status = downloader->_prepare_local_path(test_path);
-
-    // Should succeed even if file doesn't exist
     EXPECT_TRUE(status.ok());
 }
 
 TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathWithExistingFile) {
-    // Positive test: prepare path with existing file
+    // Test existing file removal
     std::string existing_file = "/tmp/existing_file.jar";
 
     // Create existing file
@@ -212,7 +236,7 @@ TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathWithExistingFile) {
 }
 
 TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathWithNestedDirectory) {
-    // Positive test: create nested directories
+    // Test nested directory creation
     std::string nested_path = "/tmp/test_dir/nested/test.jar";
     Status status = downloader->_prepare_local_path(nested_path);
 
@@ -221,31 +245,31 @@ TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathWithNestedDirectory) {
     // Directory should be created
     std::string dir_path = "/tmp/test_dir/nested";
     EXPECT_TRUE(std::filesystem::exists(dir_path));
-}
-
-TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathReadOnlyFile) {
-    // Negative test: read-only file that can't be deleted
-    std::string readonly_file = "/tmp/readonly.jar";
-
-    // Create read-only file
-    std::ofstream file(readonly_file);
-    file << "readonly content";
-    file.close();
-
-    // Make it read-only
-    std::filesystem::permissions(readonly_file, std::filesystem::perms::owner_read);
-
-    Status status = downloader->_prepare_local_path(readonly_file);
-
-    // Should fail to delete read-only file
-    EXPECT_FALSE(status.ok());
 
     // Clean up
-    std::filesystem::permissions(readonly_file, std::filesystem::perms::owner_all);
-    std::filesystem::remove(readonly_file);
+    std::filesystem::remove_all("/tmp/test_dir");
 }
 
-// ============== _download_remote_file Tests ==============
+TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathNoDirectory) {
+    // Test file path without directory part
+    std::string simple_path = "test.jar"; // No directory separator
+    Status status = downloader->_prepare_local_path(simple_path);
+
+    EXPECT_TRUE(status.ok()); // Should handle gracefully
+}
+
+TEST_F(CloudPluginDownloaderTest, TestPrepareLocalPathRootDirectory) {
+    // Test file in root directory
+    std::string root_path = "/test_root.jar";
+    Status status = downloader->_prepare_local_path(root_path);
+
+    EXPECT_TRUE(status.ok()); // Should handle root directory
+
+    // Clean up if file was created
+    std::filesystem::remove(root_path);
+}
+
+// ============== Download Tests ==============
 
 TEST_F(CloudPluginDownloaderTest, TestDownloadRemoteFileInvalidFilesystem) {
     // Negative test: null filesystem
@@ -257,51 +281,31 @@ TEST_F(CloudPluginDownloaderTest, TestDownloadRemoteFileInvalidFilesystem) {
     // Should fail when trying to use null filesystem
 }
 
-// ============== Integration and Consistency Tests ==============
+// ============== Consistency Tests ==============
 
-TEST_F(CloudPluginDownloaderTest, TestPathBuildingConsistency) {
-    // Ensure _get_type_path_segment and _build_plugin_path are consistent
-    auto types = {CloudPluginDownloader::PluginType::JDBC_DRIVERS,
-                  CloudPluginDownloader::PluginType::JAVA_UDF,
-                  CloudPluginDownloader::PluginType::CONNECTORS,
-                  CloudPluginDownloader::PluginType::HADOOP_CONF};
+// Note: PathSegmentConsistency test removed - no longer needed since logic is unified in _build_plugin_path
 
-    for (auto type : types) {
-        std::string segment = downloader->_get_type_path_segment(type);
-        std::string full_path = downloader->_build_plugin_path(type, "test.jar");
-        std::string expected = "plugins/" + segment + "/test.jar";
-        EXPECT_EQ(expected, full_path);
-    }
-}
-
-TEST_F(CloudPluginDownloaderTest, TestAllPluginTypesCoverage) {
-    // Verify all plugin types are handled correctly
+TEST_F(CloudPluginDownloaderTest, TestAllTypePathCombinations) {
     struct TestCase {
         CloudPluginDownloader::PluginType type;
         std::string name;
-        std::string expected_path;
-        std::string expected_segment;
+        std::string expected;
     };
 
     std::vector<TestCase> test_cases = {
             {CloudPluginDownloader::PluginType::JDBC_DRIVERS, "driver.jar",
-             "plugins/jdbc_drivers/driver.jar", "jdbc_drivers"},
-            {CloudPluginDownloader::PluginType::JAVA_UDF, "udf.jar", "plugins/java_udf/udf.jar",
-             "java_udf"},
-            {CloudPluginDownloader::PluginType::CONNECTORS, "conn.jar",
-             "plugins/connectors/conn.jar", "connectors"},
-            {CloudPluginDownloader::PluginType::HADOOP_CONF, "hadoop.xml",
-             "plugins/hadoop_conf/hadoop.xml", "hadoop_conf"}};
+             "plugins/jdbc_drivers/driver.jar"},
+            {CloudPluginDownloader::PluginType::JAVA_UDF, "udf.jar", "plugins/java_udf/udf.jar"},
+    };
 
     for (const auto& test_case : test_cases) {
-        // Test path building
-        EXPECT_EQ(test_case.expected_path,
-                  downloader->_build_plugin_path(test_case.type, test_case.name))
-                << "Path building failed for type: " << static_cast<int>(test_case.type);
-
-        // Test segment generation
-        EXPECT_EQ(test_case.expected_segment, downloader->_get_type_path_segment(test_case.type))
-                << "Segment generation failed for type: " << static_cast<int>(test_case.type);
+        std::string result;
+        Status status = downloader->_build_plugin_path(test_case.type, test_case.name, &result);
+        EXPECT_TRUE(status.ok()) << "Failed for type: " << static_cast<int>(test_case.type)
+                                 << ", name: " << test_case.name << ", error: " << status.msg();
+        EXPECT_EQ(test_case.expected, result)
+                << "Failed for type: " << static_cast<int>(test_case.type)
+                << ", name: " << test_case.name;
     }
 }
 

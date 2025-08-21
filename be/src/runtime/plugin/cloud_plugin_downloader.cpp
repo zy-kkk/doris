@@ -43,8 +43,9 @@ Status CloudPluginDownloader::download_from_cloud(PluginType type, const std::st
     RETURN_IF_ERROR(downloader._get_cloud_filesystem(&filesystem));
 
     // 2. Build remote plugin path
-    std::string remote_path = downloader._build_plugin_path(type, name);
-    LOG(INFO) << "Downloading plugin: " << remote_path << " -> " << local_path;
+    std::string remote_path;
+    RETURN_IF_ERROR(downloader._build_plugin_path(type, name, &remote_path));
+    LOG(INFO) << "Downloading plugin: " << name << " -> " << local_path;
 
     // 3. Prepare local environment
     RETURN_IF_ERROR(downloader._prepare_local_path(local_path));
@@ -53,28 +54,26 @@ Status CloudPluginDownloader::download_from_cloud(PluginType type, const std::st
     RETURN_IF_ERROR(downloader._download_remote_file(filesystem, remote_path, local_path));
 
     *result_path = local_path;
-    LOG(INFO) << "Successfully downloaded plugin: " << remote_path << " to " << local_path;
+    LOG(INFO) << "Successfully downloaded plugin: " << name << " to " << local_path;
 
     return Status::OK();
 }
 
-std::string CloudPluginDownloader::_build_plugin_path(PluginType type, const std::string& name) {
-    return fmt::format("plugins/{}/{}", _get_type_path_segment(type), name);
-}
-
-std::string CloudPluginDownloader::_get_type_path_segment(PluginType type) {
+Status CloudPluginDownloader::_build_plugin_path(PluginType type, const std::string& name,
+                                                 std::string* path) {
+    std::string type_name;
     switch (type) {
     case PluginType::JDBC_DRIVERS:
-        return "jdbc_drivers";
+        type_name = "jdbc_drivers";
+        break;
     case PluginType::JAVA_UDF:
-        return "java_udf";
-    case PluginType::CONNECTORS:
-        return "connectors";
-    case PluginType::HADOOP_CONF:
-        return "hadoop_conf";
+        type_name = "java_udf";
+        break;
     default:
-        return "unknown";
+        return Status::InvalidArgument("Unsupported plugin type: {}", static_cast<int>(type));
     }
+    *path = fmt::format("plugins/{}/{}", type_name, name);
+    return Status::OK();
 }
 
 Status CloudPluginDownloader::_get_cloud_filesystem(io::RemoteFileSystemSPtr* filesystem) {

@@ -47,10 +47,7 @@ private:
     friend class CloudPluginDownloaderTest;
 
     // Build remote plugin path: plugins/{type}/{name}
-    std::string _build_plugin_path(PluginType type, const std::string& name);
-
-    // Get plugin type directory name
-    std::string _get_type_path_segment(PluginType type);
+    Status _build_plugin_path(PluginType type, const std::string& name, std::string* path);
 
     // Get cloud filesystem
     Status _get_cloud_filesystem(io::RemoteFileSystemSPtr* filesystem);
