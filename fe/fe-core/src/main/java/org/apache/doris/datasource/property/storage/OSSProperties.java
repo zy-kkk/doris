@@ -162,7 +162,7 @@ public class OSSProperties extends AbstractS3CompatibleProperties {
 
     protected static boolean guessIsMe(Map<String, String> origProps) {
         String value = Stream.of("oss.endpoint", "s3.endpoint", "AWS_ENDPOINT", "endpoint", "ENDPOINT",
-                        "dlf.endpoint", "dlf.catalog.endpoint")
+                        "dlf.endpoint", "dlf.catalog.endpoint", "fs.oss.endpoint")
                 .map(origProps::get)
                 .filter(Objects::nonNull)
                 .findFirst()
