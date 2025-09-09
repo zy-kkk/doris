@@ -34,6 +34,7 @@ public class CredentialUtils {
      * Supported cloud storage prefixes for filtering vended credentials
      */
     private static final Set<String> CLOUD_STORAGE_PREFIXES = new HashSet<>(Arrays.asList(
+            "fs.",      // file system
             "s3.",      // Amazon S3
             "oss.",     // Alibaba OSS
             "cos.",     // Tencent COS
