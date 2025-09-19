@@ -131,6 +131,8 @@ public abstract class ExternalCatalog
             USE_META_CACHE);
 
     protected static final int ICEBERG_CATALOG_EXECUTOR_THREAD_NUM = Runtime.getRuntime().availableProcessors();
+    protected static final int ICEBERG_CATALOG_PLANNING_THREAD_NUM =
+            Math.min(Runtime.getRuntime().availableProcessors(), 16);
 
     // Unique id of this catalog, will be assigned after catalog is loaded.
     @SerializedName(value = "id")
@@ -170,6 +172,7 @@ public abstract class ExternalCatalog
     protected MetaCache<ExternalDatabase<? extends ExternalTable>> metaCache;
     protected ExecutionAuthenticator executionAuthenticator;
     protected ThreadPoolExecutor threadPoolWithPreAuth;
+    protected ThreadPoolExecutor planningThreadPoolWithPreAuth;
 
     private volatile Configuration cachedConf = null;
     private byte[] confLock = new byte[0];
@@ -776,6 +779,10 @@ public abstract class ExternalCatalog
         if (threadPoolWithPreAuth != null) {
             ThreadPoolManager.shutdownExecutorService(threadPoolWithPreAuth);
         }
+        if (planningThreadPoolWithPreAuth != null && planningThreadPoolWithPreAuth != threadPoolWithPreAuth) {
+            ThreadPoolManager.shutdownExecutorService(planningThreadPoolWithPreAuth);
+        }
+        planningThreadPoolWithPreAuth = null;
         if (null != executionAuthenticator) {
             executionAuthenticator = null;
         }
@@ -1373,6 +1380,10 @@ public abstract class ExternalCatalog
         return threadPoolWithPreAuth;
     }
 
+    public ThreadPoolExecutor getPlanningThreadPoolWithPreAuth() {
+        return planningThreadPoolWithPreAuth != null ? planningThreadPoolWithPreAuth : threadPoolWithPreAuth;
+    }
+
     /**
      * Check if an external view exists.
      * @param dbName
@@ -1600,4 +1611,3 @@ public abstract class ExternalCatalog
         }
     }
 }
-

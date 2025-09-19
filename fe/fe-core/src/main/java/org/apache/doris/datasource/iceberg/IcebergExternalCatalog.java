@@ -26,12 +26,17 @@ import org.apache.doris.datasource.operations.ExternalMetadataOperations;
 import org.apache.doris.datasource.property.metastore.AbstractIcebergProperties;
 import org.apache.doris.transaction.TransactionManagerFactory;
 
+import com.google.common.base.Strings;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public abstract class IcebergExternalCatalog extends ExternalCatalog {
+
+    private static final Logger LOG = LogManager.getLogger(IcebergExternalCatalog.class);
 
     public static final String ICEBERG_CATALOG_TYPE = "iceberg.catalog.type";
     public static final String ICEBERG_REST = "rest";
@@ -41,6 +46,8 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
     public static final String ICEBERG_DLF = "dlf";
     public static final String ICEBERG_S3_TABLES = "s3tables";
     public static final String EXTERNAL_CATALOG_NAME = "external_catalog.name";
+    private static final String ICEBERG_COMMIT_THREAD_NUM_PROP = "iceberg.commit.thread.num";
+    private static final String ICEBERG_PLANNING_THREAD_NUM_PROP = "iceberg.planning.thread.num";
     protected String icebergCatalogType;
     protected Catalog catalog;
 
@@ -84,12 +91,38 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
         initPreExecutionAuthenticator();
         IcebergMetadataOps ops = ExternalMetadataOperations.newIcebergMetadataOps(this, catalog);
         transactionManager = TransactionManagerFactory.createIcebergTransactionManager(ops);
+        int commitThreads = getThreadCountFromProperty(
+                ICEBERG_COMMIT_THREAD_NUM_PROP, ICEBERG_CATALOG_EXECUTOR_THREAD_NUM);
+        if (commitThreads < 1) {
+            LOG.warn("Invalid commit thread count {} for catalog {}, fallback to 1", commitThreads, name);
+            commitThreads = 1;
+        }
         threadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPoolWithPreAuth(
-                ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
+                commitThreads,
                 Integer.MAX_VALUE,
                 String.format("iceberg_catalog_%s_executor_pool", name),
                 true,
                 executionAuthenticator);
+        int planningThreads = getThreadCountFromProperty(
+                ICEBERG_PLANNING_THREAD_NUM_PROP, ICEBERG_CATALOG_PLANNING_THREAD_NUM);
+        if (planningThreads > 0) {
+            planningThreadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPoolWithPreAuth(
+                    planningThreads,
+                    Integer.MAX_VALUE,
+                    String.format("iceberg_catalog_%s_planning_pool", name),
+                    true,
+                    executionAuthenticator);
+        } else {
+            planningThreadPoolWithPreAuth = null;
+            LOG.info("Iceberg catalog {} planning thread pool disabled (configured size: {}). "
+                            + "Planning tasks will reuse the commit executor.",
+                    name, planningThreads);
+        }
+        LOG.info("Initialized Iceberg catalog {} executors: commitThreads={}, planningThreads={}{}",
+                name,
+                commitThreads,
+                planningThreads,
+                planningThreads <= 0 ? " (fallback to commit executor)" : "");
         metadataOps = ops;
     }
 
@@ -143,5 +176,19 @@ public abstract class IcebergExternalCatalog extends ExternalCatalog {
     @Override
     public boolean viewExists(String dbName, String viewName) {
         return metadataOps.viewExists(dbName, viewName);
+    }
+
+    private int getThreadCountFromProperty(String key, int defaultValue) {
+        String raw = catalogProperty.getOrDefault(key, null);
+        if (Strings.isNullOrEmpty(raw)) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            LOG.warn("Invalid thread count '{}' for catalog '{}' property '{}', fallback to {}",
+                    raw, name, key, defaultValue);
+            return defaultValue;
+        }
     }
 }
