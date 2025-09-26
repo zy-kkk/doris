@@ -31,6 +31,7 @@ import org.apache.doris.datasource.SessionContext;
 import org.apache.doris.datasource.iceberg.IcebergMetadataOps;
 import org.apache.doris.datasource.iceberg.IcebergUtils;
 import org.apache.doris.datasource.operations.ExternalMetadataOperations;
+import org.apache.doris.datasource.operations.ExternalMetadataOps;
 import org.apache.doris.datasource.property.metastore.AbstractHMSProperties;
 import org.apache.doris.fs.FileSystemProvider;
 import org.apache.doris.fs.FileSystemProviderImpl;
@@ -137,12 +138,14 @@ public class HMSExternalCatalog extends ExternalCatalog {
         this.hmsProperties = (AbstractHMSProperties) catalogProperty.getMetastoreProperties();
         initPreExecutionAuthenticator();
         HiveMetadataOps hiveOps = ExternalMetadataOperations.newHiveMetadataOps(hmsProperties.getHiveConf(), this);
-        threadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPoolWithPreAuth(
-                ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
-                Integer.MAX_VALUE,
-                String.format("hms_iceberg_catalog_%s_executor_pool", name),
-                true,
-                executionAuthenticator);
+        if (threadPoolWithPreAuth == null) {
+            threadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPool(
+                    ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
+                    Integer.MAX_VALUE,
+                    String.format("hms_iceberg_catalog_%s_executor_pool", name),
+                    true);
+        }
+        executorWithPreAuth = createExecutorWithPreAuth(threadPoolWithPreAuth);
         FileSystemProvider fileSystemProvider = new FileSystemProviderImpl(Env.getCurrentEnv().getExtMetaCacheMgr(),
                 this.catalogProperty.getStoragePropertiesMap());
         this.fileSystemExecutor = ThreadPoolManager.newDaemonFixedThreadPool(FILE_SYSTEM_EXECUTOR_THREAD_NUM,
@@ -154,9 +157,10 @@ public class HMSExternalCatalog extends ExternalCatalog {
 
     @Override
     public synchronized void resetToUninitialized(boolean invalidCache) {
+        ExternalMetadataOps oldMetadataOps = metadataOps;
         super.resetToUninitialized(invalidCache);
-        if (metadataOps != null) {
-            metadataOps.close();
+        if (oldMetadataOps != null) {
+            oldMetadataOps.close();
         }
     }
 
@@ -243,4 +247,3 @@ public class HMSExternalCatalog extends ExternalCatalog {
         return icebergMetadataOps;
     }
 }
-

@@ -66,7 +66,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
 public class IcebergMetadataOps implements ExternalMetadataOps {
@@ -798,7 +798,7 @@ public class IcebergMetadataOps implements ExternalMetadataOps {
         return externalCatalogName.map(Namespace::of).orElseGet(() -> Namespace.empty());
     }
 
-    public ThreadPoolExecutor getThreadPoolWithPreAuth() {
+    public ExecutorService getThreadPoolWithPreAuth() {
         return dorisCatalog.getThreadPoolWithPreAuth();
     }
 
@@ -810,4 +810,3 @@ public class IcebergMetadataOps implements ExternalMetadataOps {
         viewCatalog.dropView(getTableIdentifier(remoteDbName, remoteViewName));
     }
 }
-

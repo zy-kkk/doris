@@ -96,7 +96,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -170,6 +173,7 @@ public abstract class ExternalCatalog
     protected MetaCache<ExternalDatabase<? extends ExternalTable>> metaCache;
     protected ExecutionAuthenticator executionAuthenticator;
     protected ThreadPoolExecutor threadPoolWithPreAuth;
+    protected ExecutorService executorWithPreAuth;
 
     private volatile Configuration cachedConf = null;
     private byte[] confLock = new byte[0];
@@ -553,17 +557,9 @@ public abstract class ExternalCatalog
     }
 
     /**
-     * Resets the Catalog state to uninitialized, releases resources held by {@code initLocalObjectsImpl()}
-     * <p>
-     * This method is typically invoked during operations such as {@code CREATE CATALOG}
-     * and {@code MODIFY CATALOG}. It marks the object as uninitialized, clears cached
-     * configurations, and ensures that resources allocated during {@link #initLocalObjectsImpl()}
-     * are properly released via {@link #onClose()}
-     * </p>
-     * <p>
-     * The {@code onClose()} method is responsible for cleaning up resources that were initialized
-     * in {@code initLocalObjectsImpl()}, preventing potential resource leaks.
-     * </p>
+     * Resets the Catalog state to uninitialized while keeping shared resources (such as the
+     * execution thread pool) alive. A subsequent call to {@link #makeSureInitialized()} will
+     * rebuild catalog-specific metadata structures.
      *
      * @param invalidCache if {@code true}, the catalog cache will be invalidated
      *                     and reloaded during the refresh process.
@@ -574,7 +570,8 @@ public abstract class ExternalCatalog
         synchronized (this.confLock) {
             this.cachedConf = null;
         }
-        onClose();
+        this.metadataOps = null;
+        this.transactionManager = null;
 
         refreshOnlyCatalogCache(invalidCache);
     }
@@ -775,7 +772,9 @@ public abstract class ExternalCatalog
         removeAccessController();
         if (threadPoolWithPreAuth != null) {
             ThreadPoolManager.shutdownExecutorService(threadPoolWithPreAuth);
+            threadPoolWithPreAuth = null;
         }
+        executorWithPreAuth = null;
         if (null != executionAuthenticator) {
             executionAuthenticator = null;
         }
@@ -786,6 +785,60 @@ public abstract class ExternalCatalog
 
     private void removeAccessController() {
         Env.getCurrentEnv().getAccessManager().removeAccessController(name);
+    }
+
+    private static class PreAuthExecutorService extends AbstractExecutorService {
+
+        private final ThreadPoolExecutor delegate;
+        private final ExecutionAuthenticator authenticator;
+
+        private PreAuthExecutorService(ThreadPoolExecutor delegate, ExecutionAuthenticator authenticator) {
+            this.delegate = delegate;
+            this.authenticator = authenticator;
+        }
+
+        @Override
+        public void shutdown() {
+            delegate.shutdown();
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            return delegate.shutdownNow();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return delegate.isShutdown();
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return delegate.isTerminated();
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+            return delegate.awaitTermination(timeout, unit);
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            delegate.execute(wrap(command));
+        }
+
+        private Runnable wrap(Runnable command) {
+            if (authenticator == null) {
+                return command;
+            }
+            return () -> {
+                try {
+                    authenticator.execute(command);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to execute task with authenticator", e);
+                }
+            };
+        }
     }
 
     public synchronized void replayInitCatalog(InitCatalogLog log) {
@@ -1369,8 +1422,15 @@ public abstract class ExternalCatalog
         return transactionManager;
     }
 
-    public ThreadPoolExecutor getThreadPoolWithPreAuth() {
-        return threadPoolWithPreAuth;
+    public ExecutorService getThreadPoolWithPreAuth() {
+        if (executorWithPreAuth == null && threadPoolWithPreAuth != null) {
+            executorWithPreAuth = createExecutorWithPreAuth(threadPoolWithPreAuth);
+        }
+        return executorWithPreAuth != null ? executorWithPreAuth : threadPoolWithPreAuth;
+    }
+
+    protected ExecutorService createExecutorWithPreAuth(ThreadPoolExecutor executor) {
+        return executor == null ? null : new PreAuthExecutorService(executor, executionAuthenticator);
     }
 
     /**
@@ -1600,4 +1660,3 @@ public abstract class ExternalCatalog
         }
     }
 }
-
