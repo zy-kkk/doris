@@ -281,6 +281,97 @@ public class ThreadPoolManager {
             .build();
     }
 
+    /**
+     * Wraps a task with authentication logic.
+     *
+     * @param task the original task to execute
+     * @param auth the authentication context to apply
+     * @return a wrapped task that executes with authentication
+     */
+    public static Runnable wrapTaskWithAuth(Runnable task, ExecutionAuthenticator auth) {
+        if (auth == null) {
+            return task;
+        }
+
+        final ExecutionAuthenticator capturedAuth = auth;
+        final Runnable capturedTask = task;
+
+        return () -> {
+            try {
+                capturedAuth.execute(capturedTask);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to execute task with authenticator", e);
+            }
+        };
+    }
+
+    /**
+     * Creates a ThreadPoolExecutor that supports dynamic authentication.
+     * Authentication is provided per-task rather than being fixed at pool creation time.
+     *
+     * @param corePoolSize the number of threads to keep in the pool
+     * @param maximumPoolSize the maximum number of threads to allow in the pool
+     * @param keepAliveTime when the number of threads is greater than the core,
+     * this is the maximum time that excess idle threads will wait for new tasks before terminating
+     * @param unit the time unit for the {@code keepAliveTime} argument
+     * @param workQueue the queue to use for holding tasks before they are executed
+     * @param poolName the name of the thread pool for identification
+     * @param needRegisterMetric whether to register metrics for this pool
+     * @return a ThreadPoolExecutor that supports dynamic authentication
+     */
+    public static DynamicAuthThreadPoolExecutor newDynamicAuthThreadPool(
+            int corePoolSize,
+            int maximumPoolSize,
+            long keepAliveTime,
+            TimeUnit unit,
+            BlockingQueue<Runnable> workQueue,
+            String poolName,
+            boolean needRegisterMetric) {
+
+        ThreadFactory threadFactory = namedThreadFactory(poolName);
+        DynamicAuthThreadPoolExecutor threadPool = new DynamicAuthThreadPoolExecutor(
+                corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory,
+                new BlockedPolicy(poolName, 60));
+
+        if (needRegisterMetric) {
+            nameToThreadPoolMap.put(poolName, threadPool);
+        }
+        return threadPool;
+    }
+
+    /**
+     * A ThreadPoolExecutor that supports dynamic authentication per task execution.
+     */
+    public static class DynamicAuthThreadPoolExecutor extends ThreadPoolExecutor {
+
+        private volatile java.util.function.Supplier<ExecutionAuthenticator> authSupplier;
+
+        public DynamicAuthThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime,
+                TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory,
+                RejectedExecutionHandler handler) {
+            super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory, handler);
+        }
+
+        /**
+         * Set the authentication supplier that provides the current auth context.
+         */
+        public void setAuthSupplier(java.util.function.Supplier<ExecutionAuthenticator> authSupplier) {
+            this.authSupplier = authSupplier;
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            if (authSupplier != null) {
+                ExecutionAuthenticator auth = authSupplier.get();
+                if (auth != null) {
+                    super.execute(wrapTaskWithAuth(command, auth));
+                    return;
+                }
+            }
+            super.execute(command);
+        }
+    }
+
     private static class PriorityThreadPoolExecutor<T> extends ThreadPoolExecutor {
 
         private final Comparator<T> comparator;

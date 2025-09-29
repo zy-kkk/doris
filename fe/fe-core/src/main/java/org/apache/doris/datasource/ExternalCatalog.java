@@ -97,6 +97,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -169,7 +170,7 @@ public abstract class ExternalCatalog
     protected Optional<Boolean> useMetaCache = Optional.empty();
     protected MetaCache<ExternalDatabase<? extends ExternalTable>> metaCache;
     protected ExecutionAuthenticator executionAuthenticator;
-    protected ThreadPoolExecutor threadPoolWithPreAuth;
+    protected ThreadPoolManager.DynamicAuthThreadPoolExecutor threadPoolWithPreAuth;
 
     private volatile Configuration cachedConf = null;
     private byte[] confLock = new byte[0];
@@ -194,6 +195,24 @@ public abstract class ExternalCatalog
     protected synchronized void initPreExecutionAuthenticator() {
         if (executionAuthenticator == null) {
             executionAuthenticator = new ExecutionAuthenticator(){};
+        }
+    }
+
+    /**
+     * Initializes the thread pool if not already created.
+     * This method ensures that the thread pool is created only once and is independent
+     * of the ExecutionAuthenticator lifecycle.
+     */
+    protected synchronized void initThreadPoolWithPreAuth() {
+        if (threadPoolWithPreAuth == null) {
+            threadPoolWithPreAuth = ThreadPoolManager.newDynamicAuthThreadPool(
+                    ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
+                    ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
+                    ThreadPoolManager.KEEP_ALIVE_TIME,
+                    TimeUnit.SECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<>(Integer.MAX_VALUE),
+                    String.format("catalog_%s_executor_pool", name),
+                    true);
         }
     }
 
@@ -574,7 +593,6 @@ public abstract class ExternalCatalog
         synchronized (this.confLock) {
             this.cachedConf = null;
         }
-        onClose();
 
         refreshOnlyCatalogCache(invalidCache);
     }
@@ -1322,7 +1340,12 @@ public abstract class ExternalCatalog
 
     public ExecutionAuthenticator getExecutionAuthenticator() {
         if (null == executionAuthenticator) {
-            throw new RuntimeException("ExecutionAuthenticator is null, please confirm it is initialized.");
+            // initPreExecutionAuthenticator() is already synchronized
+            initPreExecutionAuthenticator();
+            // 如果重新初始化后仍然为 null，抛出异常
+            if (null == executionAuthenticator) {
+                throw new RuntimeException("ExecutionAuthenticator is null, please confirm it is initialized.");
+            }
         }
         return executionAuthenticator;
     }
@@ -1370,6 +1393,22 @@ public abstract class ExternalCatalog
     }
 
     public ThreadPoolExecutor getThreadPoolWithPreAuth() {
+        initThreadPoolWithPreAuth();
+        initPreExecutionAuthenticator();
+
+        // Set the authentication supplier to provide current auth context
+        // Use defensive programming to handle concurrent refresh scenarios
+        threadPoolWithPreAuth.setAuthSupplier(() -> {
+            try {
+                // If catalog is being refreshed, executionAuthenticator might be null
+                // In this case, return null to execute without auth (safe degradation)
+                return executionAuthenticator;
+            } catch (Exception e) {
+                // Any exception during auth retrieval should not break task execution
+                return null;
+            }
+        });
+
         return threadPoolWithPreAuth;
     }
 
@@ -1600,4 +1639,3 @@ public abstract class ExternalCatalog
         }
     }
 }
-

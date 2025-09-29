@@ -58,7 +58,6 @@ public class IcebergTransaction implements Transaction {
     private final IcebergMetadataOps ops;
     private Table table;
 
-
     private org.apache.iceberg.Transaction transaction;
     private final List<TIcebergCommitData> commitDataList = Lists.newArrayList();
 

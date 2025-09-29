@@ -136,13 +136,8 @@ public class HMSExternalCatalog extends ExternalCatalog {
     protected void initLocalObjectsImpl() {
         this.hmsProperties = (AbstractHMSProperties) catalogProperty.getMetastoreProperties();
         initPreExecutionAuthenticator();
+        initThreadPoolWithPreAuth();
         HiveMetadataOps hiveOps = ExternalMetadataOperations.newHiveMetadataOps(hmsProperties.getHiveConf(), this);
-        threadPoolWithPreAuth = ThreadPoolManager.newDaemonFixedThreadPoolWithPreAuth(
-                ICEBERG_CATALOG_EXECUTOR_THREAD_NUM,
-                Integer.MAX_VALUE,
-                String.format("hms_iceberg_catalog_%s_executor_pool", name),
-                true,
-                executionAuthenticator);
         FileSystemProvider fileSystemProvider = new FileSystemProviderImpl(Env.getCurrentEnv().getExtMetaCacheMgr(),
                 this.catalogProperty.getStoragePropertiesMap());
         this.fileSystemExecutor = ThreadPoolManager.newDaemonFixedThreadPool(FILE_SYSTEM_EXECUTOR_THREAD_NUM,
@@ -243,4 +238,3 @@ public class HMSExternalCatalog extends ExternalCatalog {
         return icebergMetadataOps;
     }
 }
-

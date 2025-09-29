@@ -22,6 +22,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.profile.SummaryProfile;
+import org.apache.doris.common.security.authentication.ExecutionAuthenticator;
 import org.apache.doris.common.util.DebugUtil;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalTable;
@@ -55,6 +56,10 @@ public abstract class BaseExternalTableInsertExecutor extends AbstractInsertExec
     protected final String catalogName;
     protected Optional<SummaryProfile> summaryProfile = Optional.empty();
 
+    // Transaction-level cached authenticator (Trino-style approach)
+    // This prevents concurrent refresh issues by caching auth at transaction start
+    protected final ExecutionAuthenticator transactionAuthenticator;
+
     /**
      * constructor
      */
@@ -65,6 +70,10 @@ public abstract class BaseExternalTableInsertExecutor extends AbstractInsertExec
         super(ctx, table, labelName, planner, insertCtx, emptyInsert);
         catalogName = table.getCatalog().getName();
         transactionManager = table.getCatalog().getTransactionManager();
+
+        // Cache authenticator at transaction start (Trino-style)
+        // This isolates the transaction from catalog refresh operations
+        this.transactionAuthenticator = table.getCatalog().getExecutionAuthenticator();
 
         if (ConnectContext.get().getExecutor() != null) {
             summaryProfile = Optional.of(ConnectContext.get().getExecutor().getSummaryProfile());
@@ -96,8 +105,7 @@ public abstract class BaseExternalTableInsertExecutor extends AbstractInsertExec
             summaryProfile.ifPresent(profile -> profile.setTransactionBeginTime(transactionType()));
             if (table instanceof ExternalTable) {
                 try {
-                    ExternalTable externalTable = (ExternalTable) table;
-                    externalTable.getCatalog().getExecutionAuthenticator().execute(() -> {
+                    transactionAuthenticator.execute(() -> {
                         try {
                             transactionManager.commit(txnId);
                         } catch (UserException e) {
@@ -150,8 +158,7 @@ public abstract class BaseExternalTableInsertExecutor extends AbstractInsertExec
 
         if (table instanceof ExternalTable) {
             try {
-                ExternalTable externalTable = (ExternalTable) table;
-                externalTable.getCatalog().getExecutionAuthenticator().execute(() -> {
+                transactionAuthenticator.execute(() -> {
                     transactionManager.rollback(txnId);
                 });
             } catch (Exception e) {

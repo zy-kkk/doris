@@ -810,4 +810,3 @@ public class IcebergMetadataOps implements ExternalMetadataOps {
         viewCatalog.dropView(getTableIdentifier(remoteDbName, remoteViewName));
     }
 }
-
