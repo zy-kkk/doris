@@ -37,6 +37,7 @@ import org.apache.doris.common.Version;
 import org.apache.doris.common.security.authentication.ExecutionAuthenticator;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalSchemaCache.SchemaCacheKey;
+import org.apache.doris.datasource.connectivity.MetaConnectivityTester;
 import org.apache.doris.datasource.es.EsExternalDatabase;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
 import org.apache.doris.datasource.hive.HMSExternalDatabase;
@@ -131,6 +132,9 @@ public abstract class ExternalCatalog
             USE_META_CACHE);
 
     protected static final int ICEBERG_CATALOG_EXECUTOR_THREAD_NUM = Runtime.getRuntime().availableProcessors();
+
+    public static final String TEST_CONNECTIVITY = "test_connectivity";
+    public static final boolean DEFAULT_TEST_CONNECTIVITY = false;
 
     // Unique id of this catalog, will be assigned after catalog is loaded.
     @SerializedName(value = "id")
@@ -258,6 +262,44 @@ public abstract class ExternalCatalog
     // Will be called when creating catalog(not replaying).
     // Subclass can override this method to do some check when creating catalog.
     public void checkWhenCreating() throws DdlException {
+        boolean testConnection = Boolean.parseBoolean(
+                catalogProperty.getOrDefault(TEST_CONNECTIVITY, String.valueOf(DEFAULT_TEST_CONNECTIVITY)));
+
+        if (!testConnection) {
+            return;
+        }
+
+        List<String> errors = Lists.newArrayList();
+
+        // 1. 测试 Meta 连接 - 直接通过 property 获取 tester
+        MetaConnectivityTester metaTester = catalogProperty.getMetastoreProperties().createConnectivityTester();
+        if (metaTester != null) {
+            try {
+                metaTester.testConnection();
+            } catch (Exception e) {
+                errors.add("Meta connectivity test failed: " + e.getMessage());
+            }
+        }
+
+        // 2. 测试 Storage 连接 - 直接通过 property 获取 tester
+        // long backendId = selectRandomAliveBackend();
+        // for (StorageProperties sp : storageProps) {
+        //     StorageConnectivityTester storageTester = sp.createConnectivityTester();
+        //     if (storageTester != null) {
+        //         try {
+        //             // FE 测试
+        //             storageTester.testFeConnection();
+        //             // BE 测试
+        //             storageTester.testBeConnection(backendId);
+        //         } catch (Exception e) {
+        //             errors.add("Storage (" + sp.getType() + ") test failed: " + e.getMessage());
+        //         }
+        //     }
+        // }
+
+        if (!errors.isEmpty()) {
+            throw new DdlException("Connectivity test failed: " + String.join("; ", errors));
+        }
     }
 
     /**

@@ -18,6 +18,7 @@
 package org.apache.doris.datasource.property.storage;
 
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.connectivity.StorageConnectivityTester;
 import org.apache.doris.datasource.property.ConnectionProperties;
 import org.apache.doris.datasource.property.ConnectorProperty;
 import org.apache.doris.datasource.property.storage.exception.StoragePropertiesException;
@@ -233,4 +234,14 @@ public abstract class StorageProperties extends ConnectionProperties {
     public abstract String getStorageName();
 
     public abstract void initializeHadoopStorageConfig();
+
+    /**
+     * Create connectivity tester for this storage.
+     * Subclass can override to provide specific tester.
+     *
+     * @return null if testing not supported
+     */
+    public StorageConnectivityTester createConnectivityTester() {
+        return null;  // Default: not supported
+    }
 }
