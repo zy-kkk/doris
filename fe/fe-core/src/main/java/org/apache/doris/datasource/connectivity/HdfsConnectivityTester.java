@@ -17,24 +17,10 @@
 
 package org.apache.doris.datasource.connectivity;
 
-import org.apache.doris.datasource.property.metastore.AbstractHiveProperties;
-import org.apache.doris.datasource.property.metastore.HMSBaseProperties;
+import org.apache.doris.datasource.property.storage.HdfsCompatibleProperties;
 
-public class HiveHMSConnectivityTester extends AbstractHiveConnectivityTester {
-    private final HMSBaseConnectivityTester hmsTester;
-
-    public HiveHMSConnectivityTester(AbstractHiveProperties properties, HMSBaseProperties hmsBaseProperties) {
-        super(properties);
-        this.hmsTester = new HMSBaseConnectivityTester(hmsBaseProperties);
-    }
-
-    @Override
-    public String getTestType() {
-        return "Hive HMS";
-    }
-
-    @Override
-    public void testConnection() throws Exception {
-        hmsTester.testConnection();
+public class HdfsConnectivityTester extends HdfsCompatibleConnectivityTester {
+    public HdfsConnectivityTester(HdfsCompatibleProperties properties, String testLocation) {
+        super(properties, testLocation);
     }
 }

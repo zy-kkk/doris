@@ -17,24 +17,25 @@
 
 package org.apache.doris.datasource.connectivity;
 
+import org.apache.doris.datasource.property.metastore.AWSGlueMetaStoreBaseProperties;
 import org.apache.doris.datasource.property.metastore.AbstractHiveProperties;
-import org.apache.doris.datasource.property.metastore.HMSBaseProperties;
 
-public class HiveHMSConnectivityTester extends AbstractHiveConnectivityTester {
-    private final HMSBaseConnectivityTester hmsTester;
+public class HiveGlueMetaStoreConnectivityTester extends AbstractHiveConnectivityTester {
+    private final AWSGlueMetaStoreBaseConnectivityTester glueTester;
 
-    public HiveHMSConnectivityTester(AbstractHiveProperties properties, HMSBaseProperties hmsBaseProperties) {
+    public HiveGlueMetaStoreConnectivityTester(AbstractHiveProperties properties,
+            AWSGlueMetaStoreBaseProperties awsGlueMetaStoreBaseProperties) {
         super(properties);
-        this.hmsTester = new HMSBaseConnectivityTester(hmsBaseProperties);
+        this.glueTester = new AWSGlueMetaStoreBaseConnectivityTester(awsGlueMetaStoreBaseProperties);
     }
 
     @Override
     public String getTestType() {
-        return "Hive HMS";
+        return "Hive Glue";
     }
 
     @Override
     public void testConnection() throws Exception {
-        hmsTester.testConnection();
+        glueTester.testConnection();
     }
 }

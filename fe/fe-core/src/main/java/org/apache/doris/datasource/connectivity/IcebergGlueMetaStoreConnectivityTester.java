@@ -17,24 +17,25 @@
 
 package org.apache.doris.datasource.connectivity;
 
-import org.apache.doris.datasource.property.metastore.AbstractHiveProperties;
-import org.apache.doris.datasource.property.metastore.HMSBaseProperties;
+import org.apache.doris.datasource.property.metastore.AWSGlueMetaStoreBaseProperties;
+import org.apache.doris.datasource.property.metastore.AbstractIcebergProperties;
 
-public class HiveHMSConnectivityTester extends AbstractHiveConnectivityTester {
-    private final HMSBaseConnectivityTester hmsTester;
+public class IcebergGlueMetaStoreConnectivityTester extends AbstractIcebergConnectivityTester {
+    private final AWSGlueMetaStoreBaseConnectivityTester glueTester;
 
-    public HiveHMSConnectivityTester(AbstractHiveProperties properties, HMSBaseProperties hmsBaseProperties) {
+    public IcebergGlueMetaStoreConnectivityTester(AbstractIcebergProperties properties,
+            AWSGlueMetaStoreBaseProperties awsGlueMetaStoreBaseProperties) {
         super(properties);
-        this.hmsTester = new HMSBaseConnectivityTester(hmsBaseProperties);
+        this.glueTester = new AWSGlueMetaStoreBaseConnectivityTester(awsGlueMetaStoreBaseProperties);
     }
 
     @Override
     public String getTestType() {
-        return "Hive HMS";
+        return "Iceberg Glue";
     }
 
     @Override
     public void testConnection() throws Exception {
-        hmsTester.testConnection();
+        glueTester.testConnection();
     }
 }

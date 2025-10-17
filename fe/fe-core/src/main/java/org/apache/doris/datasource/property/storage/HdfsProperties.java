@@ -19,6 +19,8 @@ package org.apache.doris.datasource.property.storage;
 
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.security.authentication.HadoopAuthenticator;
+import org.apache.doris.datasource.connectivity.HdfsConnectivityTester;
+import org.apache.doris.datasource.connectivity.StorageConnectivityTester;
 import org.apache.doris.datasource.property.ConnectorProperty;
 
 import com.google.common.base.Strings;
@@ -199,4 +201,8 @@ public class HdfsProperties extends HdfsCompatibleProperties {
         return "HDFS";
     }
 
+    @Override
+    public StorageConnectivityTester createConnectivityTester(String testLocation) {
+        return new HdfsConnectivityTester(this, testLocation);
+    }
 }

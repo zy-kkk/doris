@@ -63,7 +63,7 @@ public class HiveHMSProperties extends AbstractHiveProperties {
 
     @Override
     public MetaConnectivityTester createConnectivityTester() {
-        return new HiveHMSConnectivityTester(hmsBaseProperties);
+        return new HiveHMSConnectivityTester(this, hmsBaseProperties);
     }
 
     private void initRefreshParams() {

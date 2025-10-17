@@ -24,7 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.regex.Pattern;
 
-public class HdfsCompatibleConnectivityTester implements StorageConnectivityTester {
+public abstract class HdfsCompatibleConnectivityTester implements StorageConnectivityTester {
     private static final Pattern HDFS_LOCATION_PATTERN = Pattern.compile("^hdfs://.+");
     protected final HdfsCompatibleProperties properties;
     protected final String testLocation;
