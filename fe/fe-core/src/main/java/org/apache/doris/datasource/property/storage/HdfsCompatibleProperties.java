@@ -48,5 +48,4 @@ public abstract class HdfsCompatibleProperties extends StorageProperties {
     public void initializeHadoopStorageConfig() {
         //nothing to do
     }
-
 }

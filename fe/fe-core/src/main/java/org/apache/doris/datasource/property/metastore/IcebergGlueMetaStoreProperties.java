@@ -17,6 +17,8 @@
 
 package org.apache.doris.datasource.property.metastore;
 
+import org.apache.doris.datasource.connectivity.IcebergGlueMetaStoreConnectivityTester;
+import org.apache.doris.datasource.connectivity.MetaConnectivityTester;
 import org.apache.doris.datasource.iceberg.IcebergExternalCatalog;
 import org.apache.doris.datasource.property.storage.S3Properties;
 import org.apache.doris.datasource.property.storage.StorageProperties;
@@ -54,6 +56,11 @@ public class IcebergGlueMetaStoreProperties extends AbstractIcebergProperties {
         super.initNormalizeAndCheckProps();
         glueProperties = AWSGlueMetaStoreBaseProperties.of(origProps);
         s3Properties = S3Properties.of(origProps);
+    }
+
+    @Override
+    public MetaConnectivityTester createConnectivityTester() {
+        return new IcebergGlueMetaStoreConnectivityTester(this, glueProperties);
     }
 
     @Override

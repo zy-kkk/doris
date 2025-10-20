@@ -17,6 +17,8 @@
 
 package org.apache.doris.datasource.property.storage;
 
+import org.apache.doris.datasource.connectivity.MinioConnectivityTester;
+import org.apache.doris.datasource.connectivity.StorageConnectivityTester;
 import org.apache.doris.datasource.property.ConnectorProperty;
 
 import com.google.common.collect.ImmutableSet;
@@ -140,5 +142,10 @@ public class MinioProperties extends AbstractS3CompatibleProperties {
     @Override
     protected Set<String> schemas() {
         return ImmutableSet.of("s3");
+    }
+
+    @Override
+    public StorageConnectivityTester createConnectivityTester(String testLocation) {
+        return new MinioConnectivityTester(this, testLocation);
     }
 }

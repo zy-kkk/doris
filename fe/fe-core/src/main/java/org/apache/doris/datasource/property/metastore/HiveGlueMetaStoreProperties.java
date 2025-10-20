@@ -17,6 +17,8 @@
 
 package org.apache.doris.datasource.property.metastore;
 
+import org.apache.doris.datasource.connectivity.HiveGlueMetaStoreConnectivityTester;
+import org.apache.doris.datasource.connectivity.MetaConnectivityTester;
 import org.apache.doris.datasource.property.ConnectorProperty;
 
 import com.amazonaws.ClientConfiguration;
@@ -91,6 +93,11 @@ public class HiveGlueMetaStoreProperties extends AbstractHiveProperties {
         super.initNormalizeAndCheckProps();
         baseProperties = AWSGlueMetaStoreBaseProperties.of(origProps);
         initHiveConf();
+    }
+
+    @Override
+    public MetaConnectivityTester createConnectivityTester() {
+        return new HiveGlueMetaStoreConnectivityTester(this, baseProperties);
     }
 
     /**
