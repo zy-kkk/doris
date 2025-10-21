@@ -17,12 +17,11 @@
 
 package org.apache.doris.datasource.property.metastore;
 
-import org.apache.doris.datasource.connectivity.HiveGlueMetaStoreConnectivityTester;
-import org.apache.doris.datasource.connectivity.MetaConnectivityTester;
 import org.apache.doris.datasource.property.ConnectorProperty;
 
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.glue.catalog.util.AWSGlueConfig;
+import lombok.Getter;
 import org.apache.hadoop.hive.conf.HiveConf;
 
 import java.util.Map;
@@ -48,6 +47,7 @@ public class HiveGlueMetaStoreProperties extends AbstractHiveProperties {
             "aws.catalog.credentials.provider.factory.class";
 
     // ========== Fields ==========
+    @Getter
     private AWSGlueMetaStoreBaseProperties baseProperties;
 
     @ConnectorProperty(names = {AWS_GLUE_MAX_RETRY_KEY},
@@ -93,11 +93,6 @@ public class HiveGlueMetaStoreProperties extends AbstractHiveProperties {
         super.initNormalizeAndCheckProps();
         baseProperties = AWSGlueMetaStoreBaseProperties.of(origProps);
         initHiveConf();
-    }
-
-    @Override
-    public MetaConnectivityTester createConnectivityTester() {
-        return new HiveGlueMetaStoreConnectivityTester(this, baseProperties);
     }
 
     /**

@@ -123,8 +123,4 @@ public class MetastoreProperties extends ConnectionProperties {
     protected MetastoreProperties(Map<String, String> props) {
         super(props);
     }
-
-    public MetaConnectivityTester createConnectivityTester() {
-        return new MetaConnectivityTester() {};
-    }
 }

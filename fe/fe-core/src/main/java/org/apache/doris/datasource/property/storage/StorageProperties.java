@@ -18,7 +18,6 @@
 package org.apache.doris.datasource.property.storage;
 
 import org.apache.doris.common.UserException;
-import org.apache.doris.datasource.connectivity.StorageConnectivityTester;
 import org.apache.doris.datasource.property.ConnectionProperties;
 import org.apache.doris.datasource.property.ConnectorProperty;
 import org.apache.doris.datasource.property.storage.exception.StoragePropertiesException;
@@ -125,8 +124,9 @@ public abstract class StorageProperties extends ConnectionProperties {
                 result.add(p);
             }
         }
+        // Add default HDFS storage if not explicitly configured
         if (result.stream().noneMatch(HdfsProperties.class::isInstance)) {
-            result.add(new HdfsProperties(origProps));
+            result.add(new HdfsProperties(origProps, false));
         }
 
         for (StorageProperties storageProperties : result) {
@@ -234,8 +234,4 @@ public abstract class StorageProperties extends ConnectionProperties {
     public abstract String getStorageName();
 
     public abstract void initializeHadoopStorageConfig();
-
-    public StorageConnectivityTester createConnectivityTester(String testLocation) {
-        return new StorageConnectivityTester() {};
-    }
 }

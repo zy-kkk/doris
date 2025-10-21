@@ -36,8 +36,7 @@ import org.apache.doris.common.Version;
 import org.apache.doris.common.security.authentication.ExecutionAuthenticator;
 import org.apache.doris.common.util.Util;
 import org.apache.doris.datasource.ExternalSchemaCache.SchemaCacheKey;
-import org.apache.doris.datasource.connectivity.MetaConnectivityTester;
-import org.apache.doris.datasource.connectivity.StorageConnectivityTester;
+import org.apache.doris.datasource.connectivity.CatalogConnectivityTestCoordinator;
 import org.apache.doris.datasource.es.EsExternalDatabase;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
 import org.apache.doris.datasource.hive.HMSExternalDatabase;
@@ -50,7 +49,6 @@ import org.apache.doris.datasource.maxcompute.MaxComputeExternalDatabase;
 import org.apache.doris.datasource.metacache.MetaCache;
 import org.apache.doris.datasource.operations.ExternalMetadataOps;
 import org.apache.doris.datasource.paimon.PaimonExternalDatabase;
-import org.apache.doris.datasource.property.storage.StorageProperties;
 import org.apache.doris.datasource.test.TestExternalCatalog;
 import org.apache.doris.datasource.test.TestExternalDatabase;
 import org.apache.doris.datasource.trinoconnector.TrinoConnectorExternalDatabase;
@@ -267,34 +265,13 @@ public abstract class ExternalCatalog
         boolean testConnection = Boolean.parseBoolean(
                 catalogProperty.getOrDefault(TEST_CONNECTION, String.valueOf(DEFAULT_TEST_CONNECTION)));
 
-        if (!testConnection) {
-            return;
-        }
-
-        MetaConnectivityTester metaTester = catalogProperty.getMetastoreProperties().createConnectivityTester();
-        try {
-            metaTester.testConnection();
-        } catch (Exception e) {
-            throw new DdlException(metaTester.getTestType() + " connectivity test failed: " + e.getMessage());
-        }
-
-        String testLocation = metaTester.getTestLocation();
-
-        Map<StorageProperties.Type, StorageProperties> storagePropertiesMap = catalogProperty.getStoragePropertiesMap();
-        for (StorageProperties storageProperties : storagePropertiesMap.values()) {
-            StorageConnectivityTester storageTester = storageProperties.createConnectivityTester(testLocation);
-            try {
-                storageTester.testFeConnection();
-            } catch (Exception e) {
-                throw new DdlException(storageTester.getTestType() + " connectivity test failed: " + e.getMessage());
-            }
-
-            try {
-                storageTester.testBeConnection();
-            } catch (Exception e) {
-                throw new DdlException(storageTester.getTestType() + " connectivity test failed (compute node): "
-                        + e.getMessage());
-            }
+        if (testConnection) {
+            CatalogConnectivityTestCoordinator coordinator = new CatalogConnectivityTestCoordinator(
+                    name,
+                    catalogProperty.getMetastoreProperties(),
+                    catalogProperty.getStoragePropertiesMap()
+            );
+            coordinator.runTests();
         }
     }
 

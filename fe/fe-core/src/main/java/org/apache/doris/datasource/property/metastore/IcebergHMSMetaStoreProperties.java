@@ -24,6 +24,7 @@ import org.apache.doris.datasource.iceberg.IcebergExternalCatalog;
 import org.apache.doris.datasource.property.ConnectorProperty;
 import org.apache.doris.datasource.property.storage.StorageProperties;
 
+import lombok.Getter;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.catalog.Catalog;
@@ -49,6 +50,7 @@ public class IcebergHMSMetaStoreProperties extends AbstractIcebergProperties {
                     + "catalog, otherwise it will only list the tables that are registered in the catalog.")
     private boolean listAllTables = true;
 
+    @Getter
     private HMSBaseProperties hmsBaseProperties;
 
     @Override
