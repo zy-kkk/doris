@@ -21,11 +21,14 @@
 package org.apache.doris.planner;
 
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.util.LocationPath;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
 import org.apache.doris.datasource.hive.HMSExternalTable;
+import org.apache.doris.datasource.hive.HiveMetaStoreCache;
 import org.apache.doris.datasource.hive.HiveMetaStoreClientHelper;
+import org.apache.doris.datasource.hive.HivePartition;
 import org.apache.doris.datasource.hive.HiveProperties;
 import org.apache.doris.nereids.trees.plans.commands.insert.HiveInsertCommandContext;
 import org.apache.doris.nereids.trees.plans.commands.insert.InsertCommandContext;
@@ -192,17 +195,34 @@ public class HiveTableSink extends BaseExternalTableDataSink {
 
     private void setPartitionValues(THiveTableSink tSink) throws AnalysisException {
         List<THivePartition> partitions = new ArrayList<>();
-        List<org.apache.hadoop.hive.metastore.api.Partition> hivePartitions =
-                ((HMSExternalCatalog) targetTable.getCatalog())
-                        .getClient().listPartitions(targetTable.getRemoteDbName(), targetTable.getRemoteName());
-        for (org.apache.hadoop.hive.metastore.api.Partition partition : hivePartitions) {
-            THivePartition hivePartition = new THivePartition();
-            StorageDescriptor sd = partition.getSd();
-            hivePartition.setFileFormat(getTFileFormatType(sd.getInputFormat()));
 
-            hivePartition.setValues(partition.getValues());
+        // Use HiveMetaStoreCache to get partition values efficiently
+        HiveMetaStoreCache cache = Env.getCurrentEnv().getExtMetaCacheMgr()
+                .getMetaStoreCache((HMSExternalCatalog) targetTable.getCatalog());
+
+        HiveMetaStoreCache.HivePartitionValues partitionValues = cache.getPartitionValues(
+                targetTable, targetTable.getPartitionColumnTypes(Optional.empty()));
+
+        if (partitionValues == null || partitionValues.getPartitionValuesMap() == null) {
+            tSink.setPartitions(partitions);
+            return;
+        }
+
+        // Convert partition values to List<List<String>> for batch loading
+        List<List<String>> partitionValuesList = new ArrayList<>(
+                partitionValues.getPartitionValuesMap().values());
+
+        // Get all partitions from cache in batch
+        List<HivePartition> hivePartitions = cache.getAllPartitionsWithCache(
+                targetTable, partitionValuesList);
+
+        for (HivePartition partition : hivePartitions) {
+            THivePartition hivePartition = new THivePartition();
+            hivePartition.setFileFormat(getTFileFormatType(partition.getInputFormat()));
+            hivePartition.setValues(partition.getPartitionValues());
+
             THiveLocationParams locationParams = new THiveLocationParams();
-            String location = sd.getLocation();
+            String location = partition.getPath();
             // pass the same of write path and target path to partition
             locationParams.setWritePath(location);
             locationParams.setTargetPath(location);

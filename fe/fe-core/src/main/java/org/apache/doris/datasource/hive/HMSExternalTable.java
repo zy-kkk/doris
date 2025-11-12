@@ -27,6 +27,7 @@ import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.SupportBinarySearchFilteringPartitions;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
@@ -56,8 +57,10 @@ import org.apache.doris.mtmv.MTMVRefreshContext;
 import org.apache.doris.mtmv.MTMVRelatedTableIf;
 import org.apache.doris.mtmv.MTMVSnapshotIf;
 import org.apache.doris.nereids.exceptions.NotSupportedException;
+import org.apache.doris.nereids.trees.plans.algebra.CatalogRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFileScan.SelectedPartitions;
 import org.apache.doris.qe.GlobalVariable;
+import org.apache.doris.rpc.RpcException;
 import org.apache.doris.statistics.AnalysisInfo;
 import org.apache.doris.statistics.BaseAnalysisTask;
 import org.apache.doris.statistics.ColumnStatistic;
@@ -115,7 +118,8 @@ import java.util.stream.Collectors;
 /**
  * Hive metastore external table.
  */
-public class HMSExternalTable extends ExternalTable implements MTMVRelatedTableIf, MTMVBaseTableIf, MvccTable {
+public class HMSExternalTable extends ExternalTable
+        implements MTMVRelatedTableIf, MTMVBaseTableIf, MvccTable, SupportBinarySearchFilteringPartitions {
     private static final Logger LOG = LogManager.getLogger(HMSExternalTable.class);
 
     public static final Set<String> SUPPORTED_HIVE_FILE_FORMATS;
@@ -1191,5 +1195,30 @@ public class HMSExternalTable extends ExternalTable implements MTMVRelatedTableI
     private Table loadHiveTable() {
         HMSCachedClient client = ((HMSExternalCatalog) catalog).getClient();
         return client.getTable(getRemoteDbName(), remoteName);
+    }
+
+    @Override
+    public Map<?, PartitionItem> getOriginPartitions(CatalogRelation scan) {
+        if (CollectionUtils.isEmpty(this.getPartitionColumns())) {
+            return Collections.emptyMap();
+        }
+        HiveMetaStoreCache cache = Env.getCurrentEnv().getExtMetaCacheMgr()
+                .getMetaStoreCache((HMSExternalCatalog) this.getCatalog());
+        List<Type> partitionColumnTypes = this.getPartitionColumnTypes(MvccUtil.getSnapshotFromContext(this));
+        HiveMetaStoreCache.HivePartitionValues hivePartitionValues = cache.getPartitionValues(
+                this, partitionColumnTypes);
+        return hivePartitionValues.getIdToPartitionItem();
+    }
+
+    @Override
+    public Object getPartitionMetaVersion(CatalogRelation scan) throws RpcException {
+        // Use the last DDL time as partition meta version
+        return getLastDdlTime();
+    }
+
+    @Override
+    public long getPartitionMetaLoadTimeMillis(CatalogRelation scan) {
+        // Use the schema update time as partition meta load time
+        return getUpdateTime();
     }
 }
