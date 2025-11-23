@@ -22,7 +22,6 @@ package org.apache.doris.planner;
 
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Env;
-import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.util.LocationPath;
 import org.apache.doris.datasource.hive.HMSExternalCatalog;
@@ -204,17 +203,14 @@ public class HiveTableSink extends BaseExternalTableDataSink {
 
         List<THivePartition> partitions = new ArrayList<>();
 
-        // Get partitions from cache instead of HMS client (similar to HiveScanNode)
-        HiveMetaStoreCache cache = Env.getCurrentEnv().getExtMetaCacheMgr()
-                .getMetaStoreCache((HMSExternalCatalog) targetTable.getCatalog());
-
         List<HivePartition> hivePartitions;
         if (targetTable.isPartitionedTable()) {
+            // Get partitions from cache instead of HMS client (similar to HiveScanNode)
+            HiveMetaStoreCache cache = Env.getCurrentEnv().getExtMetaCacheMgr()
+                    .getMetaStoreCache((HMSExternalCatalog) targetTable.getCatalog());
             // Get all partition values from cache
-            List<Type> partitionColumnTypes = targetTable.getPartitionColumnTypes(
+            HiveMetaStoreCache.HivePartitionValues partitionValues = targetTable.getHivePartitionValues(
                     MvccUtil.getSnapshotFromContext(targetTable));
-            HiveMetaStoreCache.HivePartitionValues partitionValues =
-                    cache.getPartitionValues(targetTable, partitionColumnTypes);
             List<List<String>> partitionValuesList =
                     new ArrayList<>(partitionValues.getPartitionValuesMap().values());
             hivePartitions = cache.getAllPartitionsWithCache(targetTable, partitionValuesList);

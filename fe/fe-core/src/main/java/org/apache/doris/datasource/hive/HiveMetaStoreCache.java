@@ -579,23 +579,23 @@ public class HiveMetaStoreCache {
             return;
         }
 
-        NameMapping nameMapping = table.getOrBuildNameMapping();
-        long tableId = Util.genIdByName(nameMapping.getLocalDbName(), nameMapping.getLocalTblName());
-
         // Classify partition updates by type
         Set<List<String>> modifiedPartitions = new HashSet<>();
-        boolean hasNewPartitions = false;
+        List<List<String>> newPartitionValues = new ArrayList<>();
 
         for (org.apache.doris.thrift.THivePartitionUpdate update : partitionUpdates) {
             List<String> partitionValues = HiveUtil.toPartitionValues(update.getName());
 
             switch (update.getUpdateMode()) {
                 case APPEND:
-                case OVERWRITE:
                     modifiedPartitions.add(partitionValues);
                     break;
+                case OVERWRITE:
+                    modifiedPartitions.add(partitionValues);
+                    newPartitionValues.add(partitionValues);
+                    break;
                 case NEW:
-                    hasNewPartitions = true;
+                    newPartitionValues.add(partitionValues);
                     break;
                 default:
                     LOG.warn("Unknown update mode {} for partition {}",
@@ -604,19 +604,22 @@ public class HiveMetaStoreCache {
             }
         }
 
+        NameMapping nameMapping = table.getOrBuildNameMapping();
+        long tableId = Util.genIdByName(nameMapping.getLocalDbName(), nameMapping.getLocalTblName());
+
         // Refresh file cache for modified partitions
         if (!modifiedPartitions.isEmpty()) {
             invalidateFileCache(nameMapping, tableId, modifiedPartitions);
         }
 
-        // Refresh partition values cache if new partitions were created
-        if (hasNewPartitions) {
-            invalidatePartitionValuesCache(nameMapping);
+        // Update partition values cache for new partitions
+        if (!newPartitionValues.isEmpty()) {
+            addPartitionValuesToCache(table, newPartitionValues);
         }
 
         // Log summary
         LOG.info("Refreshed cache for table {}: {} modified partitions, {} new partitions",
-                table.getName(), modifiedPartitions.size(), hasNewPartitions ? "has" : "no");
+                table.getName(), modifiedPartitions.size(), newPartitionValues.size());
     }
 
     /**
@@ -643,13 +646,38 @@ public class HiveMetaStoreCache {
     }
 
     /**
-     * Invalidates partition values cache for a table.
+     * Adds new partition values to the cache without invalidating existing entries.
+     * This method converts partition values (like ["cn", "beijing"]) to partition names
+     * (like "nation=cn/city=beijing") and calls addPartitionsCache.
+     *
+     * @param table The Hive table
+     * @param partitionValuesList List of partition values to add
      */
-    private void invalidatePartitionValuesCache(NameMapping nameMapping) {
-        partitionValuesCache.asMap().keySet().removeIf(k ->
-                k.nameMapping.getLocalDbName().equals(nameMapping.getLocalDbName())
-                && k.nameMapping.getLocalTblName().equals(nameMapping.getLocalTblName())
-        );
+    private void addPartitionValuesToCache(HMSExternalTable table, List<List<String>> partitionValuesList) {
+        if (partitionValuesList.isEmpty()) {
+            return;
+        }
+        NameMapping nameMapping = table.getOrBuildNameMapping();
+        List<Type> partitionColumnTypes = table.getPartitionColumnTypes(java.util.Optional.empty());
+        List<Column> partitionColumns = table.getPartitionColumns();
+
+        // Convert partition values to partition names
+        List<String> partitionNames = new ArrayList<>();
+        for (List<String> values : partitionValuesList) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < partitionColumns.size() && i < values.size(); i++) {
+                if (i > 0) {
+                    sb.append("/");
+                }
+                sb.append(org.apache.hadoop.hive.metastore.utils.FileUtils.escapePathName(
+                        partitionColumns.get(i).getName()));
+                sb.append("=");
+                sb.append(org.apache.hadoop.hive.metastore.utils.FileUtils.escapePathName(values.get(i)));
+            }
+            partitionNames.add(sb.toString());
+        }
+
+        addPartitionsCache(nameMapping, partitionNames, partitionColumnTypes);
     }
 
     public void invalidateDbCache(String dbName) {
@@ -958,7 +986,7 @@ public class HiveMetaStoreCache {
                 return dummyKey == ((FileCacheKey) obj).dummyKey;
             }
             return location.equals(((FileCacheKey) obj).location)
-                && Objects.equals(partitionValues, ((FileCacheKey) obj).partitionValues);
+                    && Objects.equals(partitionValues, ((FileCacheKey) obj).partitionValues);
         }
 
         boolean isSameTable(long id) {

@@ -292,46 +292,15 @@ public class HMSTransaction implements Transaction {
                             insertExistsPartitions.add(Pair.of(pu, hivePartitionStatistics));
                         } else {
                             // Truly new partition, create it
-                            StorageDescriptor sd = table.getSd();
-                            String pathForHMS = this.fileType == TFileType.FILE_S3
-                                    ? writePath
-                                    : pu.getLocation().getTargetPath();
-                            HivePartition hivePartition = new HivePartition(
-                                    nameMapping,
-                                    false,
-                                    sd.getInputFormat(),
-                                    pathForHMS,
-                                    partitionValues,
-                                    Maps.newHashMap(),
-                                    sd.getOutputFormat(),
-                                    sd.getSerdeInfo().getSerializationLib(),
-                                    sd.getCols()
-                            );
-                            addPartition(
-                                    nameMapping, hivePartition, writePath,
-                                    pu.getName(), pu.getFileNames(), hivePartitionStatistics, pu);
+                            createAndAddPartition(table, nameMapping, writePath, pu,
+                                    partitionValues, hivePartitionStatistics, false);
                         }
                         break;
                     case OVERWRITE:
-                        StorageDescriptor sd = table.getSd();
-                        String pathForHMS = this.fileType == TFileType.FILE_S3
-                                ? writePath
-                                : pu.getLocation().getTargetPath();
-                        HivePartition hivePartition = new HivePartition(
-                                nameMapping,
-                                false,
-                                sd.getInputFormat(),
-                                pathForHMS,
-                                HiveUtil.toPartitionValues(pu.getName()),
-                                Maps.newHashMap(),
-                                sd.getOutputFormat(),
-                                sd.getSerdeInfo().getSerializationLib(),
-                                sd.getCols()
-                        );
-                        dropPartition(nameMapping, hivePartition.getPartitionValues(), true);
-                        addPartition(
-                                nameMapping, hivePartition, writePath,
-                                pu.getName(), pu.getFileNames(), hivePartitionStatistics, pu);
+                        List<String> overwritePartitionValues = HiveUtil.toPartitionValues(pu.getName());
+                        dropPartition(nameMapping, overwritePartitionValues, true);
+                        createAndAddPartition(table, nameMapping, writePath, pu,
+                                overwritePartitionValues, hivePartitionStatistics, false);
                         break;
                     default:
                         throw new RuntimeException("Not support mode:[" + updateMode + "] in partitioned table");
@@ -1116,6 +1085,39 @@ public class HMSTransaction implements Transaction {
             default:
                 throw new IllegalStateException("Unknown action type: " + oldPartitionAction.getType());
         }
+    }
+
+    /**
+     * Creates a HivePartition and adds it to the partition actions.
+     * This method is used by both NEW partition creation and OVERWRITE partition creation
+     * to avoid code duplication.
+     */
+    private void createAndAddPartition(
+            Table table,
+            NameMapping nameMapping,
+            String writePath,
+            THivePartitionUpdate pu,
+            List<String> partitionValues,
+            HivePartitionStatistics hivePartitionStatistics,
+            boolean unused) {
+        StorageDescriptor sd = table.getSd();
+        String pathForHMS = this.fileType == TFileType.FILE_S3
+                ? writePath
+                : pu.getLocation().getTargetPath();
+        HivePartition hivePartition = new HivePartition(
+                nameMapping,
+                false,
+                sd.getInputFormat(),
+                pathForHMS,
+                partitionValues,
+                Maps.newHashMap(),
+                sd.getOutputFormat(),
+                sd.getSerdeInfo().getSerializationLib(),
+                sd.getCols()
+        );
+        addPartition(
+                nameMapping, hivePartition, writePath,
+                pu.getName(), pu.getFileNames(), hivePartitionStatistics, pu);
     }
 
     private synchronized void dropPartition(

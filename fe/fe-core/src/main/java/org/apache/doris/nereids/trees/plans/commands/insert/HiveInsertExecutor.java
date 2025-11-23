@@ -86,6 +86,9 @@ public class HiveInsertExecutor extends BaseExternalTableInsertExecutor {
                     .getMetaStoreCache((HMSExternalCatalog) ((HMSExternalTable) table).getCatalog());
             cache.refreshAffectedPartitions((HMSExternalTable) table, partitionUpdates);
         }
+
+        // Call parent to write edit log, so that non-master FE can sync the table refresh
+        super.doAfterCommit();
     }
 
     @Override
