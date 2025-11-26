@@ -1420,6 +1420,28 @@ Status FileScanner::_set_fill_or_truncate_columns(bool need_to_get_parsed_schema
         }
     }
 
+    // If a "columns from path" column actually exists in the file, we should not fill it from path.
+    // This can happen when user specifies COLUMNS FROM PATH AS (col) but the col also exists in the file.
+    // Remove such columns from _partition_col_descs to avoid type mismatch issues.
+    if (_fill_partition_from_path) {
+        std::vector<std::string> cols_to_remove;
+        for (const auto& [col_name, col_info] : _partition_col_descs) {
+            if (_slot_lower_name_to_col_type.contains(to_lower(col_name))) {
+                cols_to_remove.push_back(col_name);
+                LOG(WARNING) << "Column '" << col_name
+                             << "' is specified as columns_from_path but also exists in file '"
+                             << _current_range.path
+                             << "'. Will read from file instead of path.";
+            }
+        }
+        for (const auto& col_name : cols_to_remove) {
+            _partition_col_descs.erase(col_name);
+        }
+        if (_partition_col_descs.empty()) {
+            _fill_partition_from_path = false;
+        }
+    }
+
     RETURN_IF_ERROR(_generate_missing_columns());
     if (_fill_partition_from_path) {
         RETURN_IF_ERROR(_cur_reader->set_fill_columns(_partition_col_descs, _missing_col_descs));
