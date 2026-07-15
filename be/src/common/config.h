@@ -1140,6 +1140,11 @@ DECLARE_mDouble(max_amplified_read_ratio);
 // 1MB for oss, 8KB for hdfs
 DECLARE_mInt32(merged_oss_min_io_size);
 DECLARE_mInt32(merged_hdfs_min_io_size);
+// Split large object-storage range reads into bounded parallel requests.
+DECLARE_mBool(enable_parquet_parallel_range_read);
+DECLARE_mInt32(parquet_parallel_range_read_part_size_mb);
+DECLARE_mInt32(parquet_parallel_range_read_max_concurrency);
+DECLARE_mInt32(parquet_parallel_range_read_max_inflight_async_requests);
 
 // OrcReader
 DECLARE_mInt32(orc_natural_read_size_mb);

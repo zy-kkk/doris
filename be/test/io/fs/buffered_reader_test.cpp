@@ -124,6 +124,33 @@ private:
     io::Path _path = "/tmp/mock";
 };
 
+class BandwidthLimitedFileReader : public MockOffsetFileReader {
+public:
+    BandwidthLimitedFileReader(size_t size, std::atomic<int>* active_reads,
+                               std::atomic<int>* max_active_reads)
+            : MockOffsetFileReader(size),
+              _active_reads(active_reads),
+              _max_active_reads(max_active_reads) {}
+
+protected:
+    Status read_at_impl(size_t offset, Slice result, size_t* bytes_read,
+                        const io::IOContext* io_ctx) override {
+        const int active = _active_reads->fetch_add(1) + 1;
+        int max_active = _max_active_reads->load();
+        while (active > max_active &&
+               !_max_active_reads->compare_exchange_weak(max_active, active)) {
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10 * result.size / (1024 * 1024)));
+        Status status = MockOffsetFileReader::read_at_impl(offset, result, bytes_read, io_ctx);
+        _active_reads->fetch_sub(1);
+        return status;
+    }
+
+private:
+    std::atomic<int>* _active_reads;
+    std::atomic<int>* _max_active_reads;
+};
+
 class BlockingFileReader : public io::FileReader {
 public:
     BlockingFileReader(size_t size, CountDownLatch* read_started, CountDownLatch* continue_read,
@@ -515,6 +542,35 @@ TEST_F(BufferedReaderTest, test_merged_io) {
     for (auto& ref : merge_reader.box_reference()) {
         EXPECT_TRUE(ref == 0);
     }
+}
+
+TEST_F(BufferedReaderTest, test_parallel_large_range_read) {
+    constexpr size_t mb = 1024 * 1024;
+    constexpr size_t read_size = 8 * mb;
+    std::atomic<int> active_reads = 0;
+    std::atomic<int> max_active_reads = 0;
+    auto bandwidth_limited_reader = std::make_shared<BandwidthLimitedFileReader>(
+            read_size, &active_reads, &max_active_reads);
+    std::vector<io::PrefetchRange> ranges {io::PrefetchRange(0, read_size)};
+    io::MergeRangeFileReader reader(nullptr, bandwidth_limited_reader, ranges,
+                                    io::MergeRangeFileReader::READ_SLICE_SIZE, true);
+    std::vector<char> data(read_size);
+    size_t bytes_read = 0;
+
+    const int saved_part_size = config::parquet_parallel_range_read_part_size_mb;
+    const int saved_max_concurrency = config::parquet_parallel_range_read_max_concurrency;
+    config::parquet_parallel_range_read_part_size_mb = 1;
+    config::parquet_parallel_range_read_max_concurrency = 4;
+    Status status = reader.read_at(0, Slice(data.data(), data.size()), &bytes_read);
+    config::parquet_parallel_range_read_part_size_mb = saved_part_size;
+    config::parquet_parallel_range_read_max_concurrency = saved_max_concurrency;
+
+    ASSERT_TRUE(status.ok());
+    EXPECT_EQ(read_size, bytes_read);
+    EXPECT_EQ(4, max_active_reads.load());
+    EXPECT_EQ(8, reader.statistics().parallel_io);
+    EXPECT_EQ(0, static_cast<uint8_t>(data[0]));
+    EXPECT_EQ((read_size - 1) % UCHAR_MAX, static_cast<uint8_t>(data.back()));
 }
 
 TEST_F(BufferedReaderTest, test_range_cache_file_reader) {

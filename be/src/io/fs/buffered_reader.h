@@ -226,6 +226,7 @@ public:
         int64_t merged_io = 0;
         int64_t request_bytes = 0;
         int64_t merged_bytes = 0;
+        int64_t parallel_io = 0;
     };
 
     struct RangeCachedData {
@@ -279,14 +280,15 @@ public:
 
     MergeRangeFileReader(RuntimeProfile* profile, io::FileReaderSPtr reader,
                          const std::vector<PrefetchRange>& random_access_ranges,
-                         int64_t merge_read_slice_size = READ_SLICE_SIZE)
+                         int64_t merge_read_slice_size = READ_SLICE_SIZE,
+                         bool force_parallel_range_read_for_test = false)
             : _profile(profile),
               _reader(std::move(reader)),
               _random_access_ranges(random_access_ranges) {
         _range_cached_data.resize(random_access_ranges.size());
         _size = _reader->size();
         _remaining = TOTAL_BUFFER_SIZE;
-        _is_oss = typeid_cast<io::S3FileReader*>(_reader.get()) != nullptr;
+        _is_oss = force_parallel_range_read_for_test || is_object_storage_reader(_reader);
         _max_amplified_ratio = config::max_amplified_read_ratio;
         // Equivalent min size of each IO that can reach the maximum storage speed limit:
         // 1MB for oss, 8KB for hdfs
@@ -312,6 +314,8 @@ public:
                                                           random_profile, 1);
             _merged_bytes = ADD_CHILD_COUNTER_WITH_LEVEL(_profile, "MergedBytes", TUnit::BYTES,
                                                          random_profile, 1);
+            _parallel_io = ADD_CHILD_COUNTER_WITH_LEVEL(_profile, "ParallelIO", TUnit::UNIT,
+                                                        random_profile, 1);
         }
     }
 
@@ -344,6 +348,15 @@ public:
     // for test only
     const Statistics& statistics() const { return _statistics; }
 
+    static bool is_object_storage_reader(const io::FileReaderSPtr& reader) {
+        if (typeid_cast<io::S3FileReader*>(reader.get()) != nullptr) {
+            return true;
+        }
+        auto* cached_reader = typeid_cast<io::CachedRemoteFileReader*>(reader.get());
+        return cached_reader != nullptr &&
+               typeid_cast<io::S3FileReader*>(cached_reader->get_remote_reader()) != nullptr;
+    }
+
 protected:
     Status read_at_impl(size_t offset, Slice result, size_t* bytes_read,
                         const IOContext* io_ctx) override;
@@ -356,6 +369,7 @@ protected:
             COUNTER_UPDATE(_merged_io, _statistics.merged_io);
             COUNTER_UPDATE(_request_bytes, _statistics.request_bytes);
             COUNTER_UPDATE(_merged_bytes, _statistics.merged_bytes);
+            COUNTER_UPDATE(_parallel_io, _statistics.parallel_io);
             if (_reader != nullptr) {
                 _reader->collect_profile_before_close();
             }
@@ -369,6 +383,7 @@ private:
     RuntimeProfile::Counter* _merged_io = nullptr;
     RuntimeProfile::Counter* _request_bytes = nullptr;
     RuntimeProfile::Counter* _merged_bytes = nullptr;
+    RuntimeProfile::Counter* _parallel_io = nullptr;
 
     int _search_read_range(size_t start_offset, size_t end_offset);
     void _clean_cached_data(RangeCachedData& cached_data);
@@ -376,6 +391,7 @@ private:
                       size_t* bytes_read);
     Status _fill_box(int range_index, size_t start_offset, size_t to_read, size_t* bytes_read,
                      const IOContext* io_ctx);
+    Status _read_at(size_t offset, Slice result, size_t* bytes_read, const IOContext* io_ctx);
     void _dec_box_ref(int16_t box_index);
 
     RuntimeProfile* _profile = nullptr;

@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,7 @@
 #include "runtime/runtime_profile.h"
 #include "runtime/thread_context.h"
 #include "runtime/workload_management/io_throttle.h"
+#include "util/countdown_latch.h"
 #include "util/slice.h"
 #include "util/threadpool.h"
 namespace doris {
@@ -48,6 +50,84 @@ bvar::PerSecond<bvar::Adder<uint64_t>> g_bytes_downloaded_per_second("buffered_r
                                                                      "bytes_downloaded_per_second",
                                                                      &g_bytes_downloaded, 60);
 
+namespace {
+std::atomic<int> parallel_range_read_inflight {0};
+}
+
+Status MergeRangeFileReader::_read_at(size_t offset, Slice result, size_t* bytes_read,
+                                      const IOContext* io_ctx) {
+    const size_t part_size =
+            static_cast<size_t>(config::parquet_parallel_range_read_part_size_mb) * 1024 * 1024;
+    const size_t part_count = (result.size + part_size - 1) / part_size;
+    if (!_is_oss || !config::enable_parquet_parallel_range_read || part_count < 2) {
+        return _reader->read_at(offset, result, bytes_read, io_ctx);
+    }
+
+    const size_t concurrency = std::min(
+            part_count, static_cast<size_t>(config::parquet_parallel_range_read_max_concurrency));
+    std::vector<Status> statuses(concurrency);
+    std::vector<size_t> read_sizes(concurrency, 0);
+    CountDownLatch done(concurrency - 1);
+    auto read_parts = [&](size_t worker_index) {
+        for (size_t part_index = worker_index; part_index < part_count; part_index += concurrency) {
+            const size_t part_offset = part_index * part_size;
+            const size_t size = std::min(part_size, result.size - part_offset);
+            size_t part_read_size = 0;
+            statuses[worker_index] =
+                    _reader->read_at(offset + part_offset, Slice(result.data + part_offset, size),
+                                     &part_read_size, io_ctx);
+            read_sizes[worker_index] += part_read_size;
+            if (!statuses[worker_index].ok()) {
+                return;
+            }
+            if (part_read_size != size) {
+                statuses[worker_index] =
+                        Status::Corruption("Parallel range read expected {} bytes but received {}",
+                                           size, part_read_size);
+                return;
+            }
+        }
+    };
+
+    for (size_t i = 1; i < concurrency; ++i) {
+        int inflight = parallel_range_read_inflight.load(std::memory_order_relaxed);
+        bool reserved = false;
+        while (inflight < config::parquet_parallel_range_read_max_inflight_async_requests) {
+            if (parallel_range_read_inflight.compare_exchange_weak(inflight, inflight + 1,
+                                                                   std::memory_order_relaxed)) {
+                reserved = true;
+                break;
+            }
+        }
+        if (reserved) {
+            Status submit_status =
+                    ExecEnv::GetInstance()->buffered_reader_prefetch_thread_pool()->submit_func(
+                            [&, i]() {
+                                read_parts(i);
+                                parallel_range_read_inflight.fetch_sub(1,
+                                                                       std::memory_order_relaxed);
+                                done.count_down();
+                            });
+            if (submit_status.ok()) {
+                continue;
+            }
+            parallel_range_read_inflight.fetch_sub(1, std::memory_order_relaxed);
+        }
+        read_parts(i);
+        done.count_down();
+    }
+    read_parts(0);
+    done.wait();
+
+    *bytes_read = 0;
+    for (size_t i = 0; i < concurrency; ++i) {
+        RETURN_IF_ERROR(statuses[i]);
+        *bytes_read += read_sizes[i];
+    }
+    _statistics.parallel_io += part_count;
+    return Status::OK();
+}
+
 Status MergeRangeFileReader::read_at_impl(size_t offset, Slice result, size_t* bytes_read,
                                           const IOContext* io_ctx) {
     _statistics.request_io++;
@@ -58,7 +138,7 @@ Status MergeRangeFileReader::read_at_impl(size_t offset, Slice result, size_t* b
     const int range_index = _search_read_range(offset, offset + result.size);
     if (range_index < 0) {
         SCOPED_RAW_TIMER(&_statistics.read_time);
-        Status st = _reader->read_at(offset, result, bytes_read, io_ctx);
+        Status st = _read_at(offset, result, bytes_read, io_ctx);
         _statistics.merged_io++;
         _statistics.request_bytes += *bytes_read;
         _statistics.merged_bytes += *bytes_read;
@@ -93,8 +173,8 @@ Status MergeRangeFileReader::read_at_impl(size_t offset, Slice result, size_t* b
     if (to_read >= SMALL_IO || to_read >= _remaining) {
         SCOPED_RAW_TIMER(&_statistics.read_time);
         size_t read_size = 0;
-        RETURN_IF_ERROR(_reader->read_at(offset + has_read, Slice(result.data + has_read, to_read),
-                                         &read_size, io_ctx));
+        RETURN_IF_ERROR(_read_at(offset + has_read, Slice(result.data + has_read, to_read),
+                                 &read_size, io_ctx));
         *bytes_read = has_read + read_size;
         _statistics.merged_io++;
         _statistics.request_bytes += read_size;
@@ -188,8 +268,8 @@ Status MergeRangeFileReader::read_at_impl(size_t offset, Slice result, size_t* b
         // read directly to avoid copy operation
         SCOPED_RAW_TIMER(&_statistics.read_time);
         size_t read_size = 0;
-        RETURN_IF_ERROR(_reader->read_at(offset + has_read, Slice(result.data + has_read, to_read),
-                                         &read_size, io_ctx));
+        RETURN_IF_ERROR(_read_at(offset + has_read, Slice(result.data + has_read, to_read),
+                                 &read_size, io_ctx));
         *bytes_read = has_read + read_size;
         _statistics.merged_io++;
         _statistics.request_bytes += read_size;
@@ -319,8 +399,8 @@ Status MergeRangeFileReader::_fill_box(int range_index, size_t start_offset, siz
     *bytes_read = 0;
     {
         SCOPED_RAW_TIMER(&_statistics.read_time);
-        RETURN_IF_ERROR(_reader->read_at(start_offset, Slice(_read_slice->data(), to_read),
-                                         bytes_read, io_ctx));
+        RETURN_IF_ERROR(
+                _read_at(start_offset, Slice(_read_slice->data(), to_read), bytes_read, io_ctx));
         _statistics.merged_io++;
         _statistics.merged_bytes += *bytes_read;
     }

@@ -1081,6 +1081,16 @@ DEFINE_mInt32(parquet_column_max_buffer_mb, "8");
 DEFINE_mDouble(max_amplified_read_ratio, "0.8");
 DEFINE_mInt32(merged_oss_min_io_size, "1048576");
 DEFINE_mInt32(merged_hdfs_min_io_size, "8192");
+DEFINE_mBool(enable_parquet_parallel_range_read, "true");
+DEFINE_mInt32(parquet_parallel_range_read_part_size_mb, "8");
+DEFINE_mInt32(parquet_parallel_range_read_max_concurrency, "4");
+DEFINE_mInt32(parquet_parallel_range_read_max_inflight_async_requests, "64");
+DEFINE_Validator(parquet_parallel_range_read_part_size_mb,
+                 [](const int config) -> bool { return config >= 1 && config <= 128; });
+DEFINE_Validator(parquet_parallel_range_read_max_concurrency,
+                 [](const int config) -> bool { return config >= 1 && config <= 16; });
+DEFINE_Validator(parquet_parallel_range_read_max_inflight_async_requests,
+                 [](const int config) -> bool { return config >= 1 && config <= 1024; });
 
 // OrcReader
 DEFINE_mInt32(orc_natural_read_size_mb, "8");

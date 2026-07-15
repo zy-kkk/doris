@@ -990,7 +990,9 @@ Status ParquetReader::_next_row_group_reader() {
         // The underlying page reader will prefetch data in column.
         // Using both MergeRangeFileReader and BufferedStreamReader simultaneously would waste a lot of memory.
         group_file_reader =
-                avg_io_size < io::MergeRangeFileReader::SMALL_IO
+                (avg_io_size < io::MergeRangeFileReader::SMALL_IO ||
+                 (config::enable_parquet_parallel_range_read &&
+                  io::MergeRangeFileReader::is_object_storage_reader(_file_reader)))
                         ? std::make_shared<io::MergeRangeFileReader>(
                                   _profile, _file_reader, io_ranges, merged_read_slice_size)
                         : _file_reader;

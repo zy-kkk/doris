@@ -329,9 +329,14 @@ public:
                                   int64_t merge_read_slice_size) {
         reset_active_file_reader();
         const auto valid_ranges = detail::valid_prefetch_ranges(ranges);
-        if (!detail::should_use_merge_range_reader(
-                    valid_ranges, avg_io_size,
-                    typeid_cast<io::InMemoryFileReader*>(_base_file_reader.get()) != nullptr)) {
+        const bool is_in_memory_reader =
+                typeid_cast<io::InMemoryFileReader*>(_base_file_reader.get()) != nullptr;
+        const bool use_parallel_range_reader =
+                config::enable_parquet_parallel_range_read &&
+                io::MergeRangeFileReader::is_object_storage_reader(_base_file_reader);
+        if (!detail::should_use_merge_range_reader(valid_ranges, avg_io_size,
+                                                   is_in_memory_reader) &&
+            (valid_ranges.empty() || !use_parallel_range_reader)) {
             return false;
         }
 
