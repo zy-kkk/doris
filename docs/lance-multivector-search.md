@@ -27,7 +27,8 @@ and Float32, or `ARRAY<ARRAY<DOUBLE>>` for Float64.
 array must contain exactly D finite numeric values representable in the column's
 element type. A matrix with one inner array is still one multi-vector query.
 This is not a batch of independent searches or a search across several columns.
-Ordinary `FixedSizeList` columns continue to accept a one-dimensional JSON array.
+Ordinary `FixedSizeList` columns accept a one-dimensional `query_vector`, or
+independent queries through `query_vectors`; see [batch search](lance-batch-search.md).
 
 ```sql
 SELECT id, _distance
@@ -54,8 +55,8 @@ subvector contributes once; the same stored subvector may match several query
 subvectors. The score is a sum, not an average, so duplicating a query subvector
 changes the score. `_distance` uses Doris FLOAT, including for Float64 inputs.
 
-`top_k` and `offset` count table rows, not subvectors. The TVF `filter` is applied
-before candidate search. An outer SQL WHERE filters each split's returned candidates
+`top_k` and `offset` count table rows, not subvectors. The TVF `filter` defaults to postfiltering the selected candidates. Set
+`prefilter="true"` to apply it before candidate search. An outer SQL WHERE filters each split's returned candidates
 before Doris merges them into the global TopK; it does not rerun Lance search to
 replace rejected candidates within a split.
 Distributed fragments return row candidates for the global TopK. Ties at the

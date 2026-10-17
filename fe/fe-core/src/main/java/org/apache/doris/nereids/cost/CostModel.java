@@ -51,6 +51,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalEsScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalGenerate;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalIntersect;
@@ -108,6 +109,12 @@ class CostModel extends PlanVisitor<Cost, PlanContext> {
         }
         this.hboPlanStatisticsProvider = Objects.requireNonNull(Env.getCurrentEnv().getHboPlanStatisticsManager()
                 .getHboPlanStatisticsProvider(), "HboPlanStatisticsProvider is null");
+    }
+
+    @Override
+    public Cost visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, PlanContext context) {
+        double rows = context.getChildStatistics(0).getRowCount();
+        return Cost.of(context.getCostWeight(), rows, context.getStatisticsWithCheck().getRowCount(), rows);
     }
 
     @Override

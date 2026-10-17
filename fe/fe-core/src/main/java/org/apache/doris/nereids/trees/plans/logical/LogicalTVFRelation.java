@@ -125,7 +125,7 @@ public class LogicalTVFRelation extends LogicalRelation implements TVFRelation, 
     public String toString() {
         return Utils.toSqlString("LogicalTVFRelation",
                 "output", getOutput(),
-                "function", function.toSql()
+                "function", function
         );
     }
 

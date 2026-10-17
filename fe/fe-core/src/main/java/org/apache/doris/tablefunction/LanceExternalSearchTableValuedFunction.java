@@ -120,6 +120,19 @@ abstract class LanceExternalSearchTableValuedFunction extends TableValuedFunctio
         return searchRequest.deepCopy();
     }
 
+    protected final int getSearchSchemaVersion() {
+        return searchRequest.getSchemaVersion();
+    }
+
+    protected final int getSearchNumQueries() {
+        if (searchRequest.getSearchQuery().isSetVectorSearch()
+                && searchRequest.getSearchQuery().getVectorSearch().isSetQueryVector()
+                && searchRequest.getSearchQuery().getVectorSearch().getQueryVector().isSetNumQueries()) {
+            return searchRequest.getSearchQuery().getVectorSearch().getQueryVector().getNumQueries();
+        }
+        return 1;
+    }
+
     public final long getTopK() {
         return topK;
     }
@@ -213,6 +226,15 @@ abstract class LanceExternalSearchTableValuedFunction extends TableValuedFunctio
                 && parseBoolean(common.params.get(PREFILTER), PREFILTER));
         List<Column> columns = buildOutputColumns(
                 common.metadata, resultColumn, searchDescription);
+        if (searchRequest.getSchemaVersion() == 2) {
+            for (Column column : columns) {
+                if (column.getName().equalsIgnoreCase(VectorSearchTableValuedFunction.QUERY_INDEX_COLUMN)) {
+                    throw new AnalysisException("Lance batch search reserves output column 'query_index'");
+                }
+            }
+            columns.add(new Column(VectorSearchTableValuedFunction.QUERY_INDEX_COLUMN,
+                    Type.INT, false, null, false, "Zero-based batch query index", true, columns.size()));
+        }
         return new PreparedSearch(common, fieldId, searchRequest, columns);
     }
 

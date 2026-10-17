@@ -79,6 +79,8 @@ import java.util.Set;
  * TopN above this scan merges them into the requested snapshot-wide result.
  */
 public class LanceScanNode extends FileQueryScanNode {
+    private static final long MAX_BATCH_CANDIDATES = 100_000;
+
     private LanceExternalTable lanceTable;
     private LanceTableMetadata plannedMetadata;
     private LanceScanPlan scanPlan = LanceScanPlan.empty();
@@ -264,7 +266,38 @@ public class LanceScanNode extends FileQueryScanNode {
         }
         scanPlan = LanceScanPlanner.plan(plannedMetadata, searchKind, externalSearchRequest, searchFieldId,
                 lancePushedConjuncts, sessionVariable.lanceFragmentsPerSplit, countParallelism);
-        return scanPlan.createSchedulingSplits();
+        List<Split> splits = scanPlan.createSchedulingSplits();
+        validateBatchCandidateBudget(splits.size());
+        return splits;
+    }
+
+    private void validateBatchCandidateBudget(int splitCount) throws UserException {
+        if (searchKind != SearchKind.VECTOR) {
+            return;
+        }
+        TVectorSearchParams vector = externalSearchRequest.getSearchQuery().getVectorSearch();
+        if (!vector.isSetQueryVector() || !vector.getQueryVector().isSetNumQueries()) {
+            return;
+        }
+        // The per-scanner budget does not bound candidates accumulated across all splits.
+        // Keep the logical offset here: each split requests top_k + offset candidates.
+        int queries = vector.getQueryVector().getNumQueries();
+        int refine = externalSearchRequest.isSetVectorSearchOptions()
+                && externalSearchRequest.getVectorSearchOptions().isSetRefineFactor()
+                ? externalSearchRequest.getVectorSearchOptions().getRefineFactor() : 1;
+        long topK = vector.getTopK();
+        long offset = vector.getOffset();
+        if (queries <= 0 || queries > 128 || refine <= 0 || topK <= 0 || offset < 0
+                || offset > MAX_BATCH_CANDIDATES || topK > MAX_BATCH_CANDIDATES - offset) {
+            throw new UserException("Invalid Lance batch vector candidate budget");
+        }
+        // An empty snapshot has no scanners or candidate accumulation. Divide positive factors
+        // before comparing, so neither the candidate product nor top_k + offset can overflow.
+        if (splitCount > 0 && topK + offset > MAX_BATCH_CANDIDATES / splitCount / queries / refine) {
+            throw new UserException("Lance batch vector query exceeds 100000 total candidate budget: "
+                    + "splits=" + splitCount + ", queries=" + queries + ", top_k=" + topK
+                    + ", offset=" + offset + ", refine_factor=" + refine);
+        }
     }
 
     @Override
@@ -350,6 +383,10 @@ public class LanceScanNode extends FileQueryScanNode {
                 TVectorSearchParams vector =
                         externalSearchRequest.getSearchQuery().getVectorSearch();
                 result.append(prefix).append("externalSearchType=VECTOR\n");
+                if (vector.isSetQueryVector() && vector.getQueryVector().isSetNumQueries()) {
+                    result.append(prefix).append("lanceBatchQueries=")
+                            .append(vector.getQueryVector().getNumQueries()).append("\n");
+                }
                 result.append(prefix).append("lanceVectorIndexStatus=")
                         .append(scanPlan.vectorIndexStatus).append("\n");
                 result.append(prefix).append("lanceVectorColumn=")

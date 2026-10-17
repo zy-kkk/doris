@@ -36,6 +36,7 @@ import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.algebra.CatalogRelation;
 import org.apache.doris.nereids.trees.plans.algebra.Relation;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalCatalogRelation;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalLazyMaterialize;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalProject;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalTVFRelation;
@@ -80,8 +81,17 @@ public class LazyMaterializeTopN extends PlanPostProcessor {
 
     @Override
     public Plan visitPhysicalTopN(PhysicalTopN<? extends Plan> topN, CascadesContext ctx) {
+        return materialize(topN, topN.getLimit(), ctx);
+    }
+
+    @Override
+    public Plan visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, CascadesContext ctx) {
+        return topN.isGlobal() ? materialize(topN, topN.getLimit(), ctx) : topN;
+    }
+
+    private Plan materialize(Plan topN, long limit, CascadesContext ctx) {
         try {
-            Plan result = computeTopN(topN, ctx);
+            Plan result = computeTopN(topN, limit, ctx);
             if (SessionVariable.isFeDebug()) {
                 Validator validator = new Validator();
                 validator.processRoot(result, ctx);
@@ -93,13 +103,13 @@ public class LazyMaterializeTopN extends PlanPostProcessor {
         }
     }
 
-    private Plan computeTopN(PhysicalTopN<? extends Plan> topN, CascadesContext ctx) {
+    private Plan computeTopN(Plan topN, long limit, CascadesContext ctx) {
         if (hasMaterialized) {
             return topN;
         }
         SessionVariable sessionVariable = ctx.getConnectContext().getSessionVariable();
         boolean enableOtherTables = sessionVariable.topNLazyMaterializationThreshold > 0
-                && topN.getLimit() <= sessionVariable.topNLazyMaterializationThreshold;
+                && limit <= sessionVariable.topNLazyMaterializationThreshold;
         if (!sessionVariable.enableLanceLazyMaterialization && !enableOtherTables) {
             return topN;
         }
@@ -118,12 +128,12 @@ public class LazyMaterializeTopN extends PlanPostProcessor {
         }
     }
 
-    private Plan doComputeTopN(PhysicalTopN<? extends Plan> topN, CascadesContext ctx, List<Slot> effectiveOutput,
+    private Plan doComputeTopN(Plan topN, CascadesContext ctx, List<Slot> effectiveOutput,
             SessionVariable sessionVariable, boolean enableOtherTables) {
         Map<Slot, MaterializeSource> materializeMap = new HashMap<>();
         List<Slot> materializedSlots = new ArrayList<>();
         Set<Slot> requiredMaterializedSlots = new HashSet<>();
-        collectProjectExprInputSlots(topN.child(), requiredMaterializedSlots);
+        collectProjectExprInputSlots(topN.child(0), requiredMaterializedSlots);
 
         /*
          * requiredMaterializedSlots only records slots consumed by Project/final-projection expressions inside the
@@ -372,7 +382,7 @@ public class LazyMaterializeTopN extends PlanPostProcessor {
         return new ArrayList<>(materializeMap.keySet());
     }
 
-    private Optional<MaterializeSource> computeMaterializeSource(PhysicalTopN<? extends Plan> topN, SlotReference slot,
+    private Optional<MaterializeSource> computeMaterializeSource(Plan topN, SlotReference slot,
             Set<Slot> requiredMaterializedSlots) {
         MaterializeProbeVisitor probe = new MaterializeProbeVisitor();
         MaterializeProbeVisitor.ProbeContext context = new MaterializeProbeVisitor.ProbeContext(slot,

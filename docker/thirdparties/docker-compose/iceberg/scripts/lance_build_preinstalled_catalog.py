@@ -966,7 +966,8 @@ def build(root: Path, all_types_source: Path, time_travel_source: Path, carried_
     shutil.copytree(all_types_source, root / ALL_TYPES_DIR)
     # Not rebuilt: their commit times are hard-coded in the time-travel and search-snapshot suites.
     shutil.copytree(time_travel_source, root / TIME_TRAVEL_DIR)
-    for name in (SEARCH_SNAPSHOT_DIR, SEARCH_SNAPSHOT_PRUNED_DIR, LEGACY_VECTOR_INDEX_DIR, UNICODE_BRANCH_DIR):
+    for name in (SEARCH_SNAPSHOT_DIR, SEARCH_SNAPSHOT_PRUNED_DIR, LEGACY_VECTOR_INDEX_DIR, UNICODE_BRANCH_DIR,
+                 "batch_search.lance", "batch_search_hnsw.lance", "batch_search_hnsw_flat.lance"):
         shutil.copytree(carried_root / name, root / name)
     build_search_snapshot_evolved(root / SEARCH_SNAPSHOT_EVOLVED_DIR)
     build_multi_frag(root)
@@ -1839,7 +1840,8 @@ def main() -> int:
     if not time_travel_source.is_dir():
         print(f"missing time_travel source: {time_travel_source}", file=sys.stderr)
         return 1
-    for name in (SEARCH_SNAPSHOT_DIR, SEARCH_SNAPSHOT_PRUNED_DIR, LEGACY_VECTOR_INDEX_DIR, UNICODE_BRANCH_DIR):
+    for name in (SEARCH_SNAPSHOT_DIR, SEARCH_SNAPSHOT_PRUNED_DIR, LEGACY_VECTOR_INDEX_DIR, UNICODE_BRANCH_DIR,
+                 "batch_search.lance", "batch_search_hnsw.lance", "batch_search_hnsw_flat.lance"):
         if not (output / name).is_dir():
             print(f"missing carried-over source: {output / name}", file=sys.stderr)
             return 1

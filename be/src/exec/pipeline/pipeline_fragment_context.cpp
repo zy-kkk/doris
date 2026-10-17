@@ -1638,7 +1638,8 @@ Status PipelineFragmentContext::_create_operator(ObjectPool* pool, const TPlanNo
         RETURN_IF_ERROR(cur_pipe->sink()->init(tnode, _runtime_state.get()));
         break;
     }
-    case TPlanNodeType::PARTITION_SORT_NODE: {
+    case TPlanNodeType::PARTITION_SORT_NODE:
+    case TPlanNodeType::GROUP_TOPN_NODE: {
         op = std::make_shared<PartitionSortSourceOperatorX>(pool, tnode, next_operator_id(), descs);
         RETURN_IF_ERROR(cur_pipe->add_operator(op, _parallel_instances));
 

@@ -113,6 +113,7 @@ private:
     const bool _has_global_limit = false;
     const TopNAlgorithm::type _top_n_algorithm = TopNAlgorithm::ROW_NUMBER;
     const int64_t _partition_inner_limit = 0;
+    int64_t _partition_offset = 0;
 
     VExprContextSPtrs _partition_expr_ctxs;
     const std::vector<TExpr> _distribute_exprs;

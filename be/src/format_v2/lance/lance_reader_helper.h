@@ -44,6 +44,7 @@ class Schema;
 namespace doris::format::lance {
 
 inline constexpr std::string_view LANCE_DISTANCE_COLUMN = "_distance";
+inline constexpr std::string_view LANCE_QUERY_INDEX_COLUMN = "query_index";
 inline constexpr std::string_view LANCE_SCORE_COLUMN = "_score";
 inline constexpr std::string_view LANCE_ROW_ID_COLUMN = "_rowid";
 inline constexpr const char* LANCE_READER_PROFILE = "LanceReader";

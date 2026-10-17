@@ -31,6 +31,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalCTEAnchor;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalCTEProducer;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalEsScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileScan;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalJdbcScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalLazyMaterializeOlapScan;
@@ -80,6 +81,11 @@ public class TopnFilterPushDownVisitor extends PlanVisitor<Boolean, PushDownCont
             return new PushDownContext(topn, newProbe, nullsFirst);
         }
 
+    }
+
+    @Override
+    public Boolean visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, PushDownContext ctx) {
+        return false;
     }
 
     @Override

@@ -47,6 +47,8 @@ public class PartitionSortNode extends PlanNode {
     private final SortInfo info;
     private final boolean hasGlobalLimit;
     private final long partitionLimit;
+    private Long partitionOffset;
+    private boolean groupTopN;
     private final PartitionTopnPhase phase;
 
     /**
@@ -66,6 +68,20 @@ public class PartitionSortNode extends PlanNode {
         this.tblRefIds.addAll(Lists.newArrayList(info.getSortTupleDescriptor().getId()));
         this.nullableTupleIds.addAll(input.getNullableTupleIds());
         this.children.add(input);
+    }
+
+    /** Give final group windows their own wire type so older merge-only backends reject them. */
+    public void setGroupTopN() {
+        Preconditions.checkArgument(function == WindowFuncType.ROW_NUMBER
+                && (phase == PartitionTopnPhase.TWO_PHASE_LOCAL_PTOPN
+                || phase == PartitionTopnPhase.TWO_PHASE_GLOBAL_PTOPN));
+        groupTopN = true;
+    }
+
+    public void setPartitionOffset(long offset) {
+        Preconditions.checkArgument(groupTopN && offset >= 0 && function == WindowFuncType.ROW_NUMBER
+                && phase == PartitionTopnPhase.TWO_PHASE_GLOBAL_PTOPN);
+        partitionOffset = offset;
     }
 
     @Override
@@ -124,6 +140,10 @@ public class PartitionSortNode extends PlanNode {
         output.append(prefix).append("has global limit: ").append(hasGlobalLimit).append("\n");
         output.append(prefix).append("partition limit: ").append(partitionLimit).append("\n");
 
+        if (partitionOffset != null) {
+            output.append(prefix).append("partition offset: ").append(partitionOffset).append("\n");
+        }
+
         // mark partition topn phase
         output.append(prefix).append("partition topn phase: ").append(phase).append("\n");
 
@@ -132,7 +152,7 @@ public class PartitionSortNode extends PlanNode {
 
     @Override
     protected void toThrift(TPlanNode msg) {
-        msg.node_type = TPlanNodeType.PARTITION_SORT_NODE;
+        msg.node_type = groupTopN ? TPlanNodeType.GROUP_TOPN_NODE : TPlanNodeType.PARTITION_SORT_NODE;
 
         TSortInfo sortInfo = info.toThrift();
         Preconditions.checkState(tupleIds.size() == 1, "Incorrect size for tupleIds in PartitionSortNode");
@@ -167,6 +187,9 @@ public class PartitionSortNode extends PlanNode {
         partitionSortNode.setHasGlobalLimit(hasGlobalLimit);
         partitionSortNode.setPartitionInnerLimit(partitionLimit);
         partitionSortNode.setPtopnPhase(pTopNPhase);
+        if (partitionOffset != null) {
+            partitionSortNode.setPartitionOffset(partitionOffset);
+        }
         msg.partition_sort_node = partitionSortNode;
     }
 }

@@ -59,8 +59,8 @@ Status PartitionSortSinkLocalState::init(RuntimeState* state, LocalSinkStateInfo
     _sorted_partition_input_rows_counter =
             ADD_COUNTER(custom_profile(), "SortedPartitionInputRows", TUnit::UNIT);
     _partition_sort_info = std::make_shared<PartitionSortInfo>(
-            &_ordering_expr_ctxs, p._limit, 0, p._pool, p._is_asc_order, p._nulls_first,
-            p._child->row_desc(), state, custom_profile(), p._has_global_limit,
+            &_ordering_expr_ctxs, p._limit, p._partition_offset, p._pool, p._is_asc_order,
+            p._nulls_first, p._child->row_desc(), state, custom_profile(), p._has_global_limit,
             p._partition_inner_limit, p._top_n_algorithm, p._topn_phase);
     custom_profile()->add_info_string("PartitionTopNPhase", to_string(p._topn_phase));
     custom_profile()->add_info_string("PartitionTopNLimit",
@@ -86,6 +86,14 @@ PartitionSortSinkOperatorX::PartitionSortSinkOperatorX(ObjectPool* pool, int ope
 
 Status PartitionSortSinkOperatorX::init(const TPlanNode& tnode, RuntimeState* state) {
     RETURN_IF_ERROR(DataSinkOperatorX::init(tnode, state));
+    if (tnode.partition_sort_node.__isset.partition_offset) {
+        _partition_offset = tnode.partition_sort_node.partition_offset;
+        if (_partition_offset < 0 || _top_n_algorithm != TopNAlgorithm::ROW_NUMBER ||
+            _topn_phase != TPartTopNPhase::TWO_PHASE_GLOBAL) {
+            return Status::InvalidArgument(
+                    "partition_offset requires global ROW_NUMBER partition sort");
+        }
+    }
 
     //order by key
     if (tnode.partition_sort_node.__isset.sort_info) {

@@ -125,6 +125,7 @@ import org.apache.doris.nereids.trees.plans.JoinType;
 import org.apache.doris.nereids.trees.plans.PartitionTopnPhase;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PreAggStatus;
+import org.apache.doris.nereids.trees.plans.WindowFuncType;
 import org.apache.doris.nereids.trees.plans.algebra.Aggregate;
 import org.apache.doris.nereids.trees.plans.algebra.Relation;
 import org.apache.doris.nereids.trees.plans.physical.AbstractPhysicalJoin;
@@ -143,6 +144,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalFileScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileSink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalGenerate;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHiveTableSink;
@@ -355,6 +357,40 @@ public class PhysicalPlanTranslator extends DefaultPlanVisitor<PlanFragment, Pla
     /* ********************************************************************************************
      * distribute node
      * ******************************************************************************************** */
+
+    @Override
+    public PlanFragment visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN,
+            PlanTranslatorContext context) {
+        PlanFragment input = topN.child().accept(this, context);
+        List<List<Expr>> distributeExprLists = getDistributeExprs(topN.child());
+        List<Expr> groupExprs = topN.getGroupKeys().stream()
+                .map(expr -> ExpressionTranslator.translate(expr, context)).collect(Collectors.toList());
+        TupleDescriptor tuple = generateTupleDesc(topN.child().getOutput(), null, context);
+        List<Expr> ordering = Lists.newArrayList();
+        List<Boolean> ascending = Lists.newArrayList();
+        List<Boolean> nullsFirst = Lists.newArrayList();
+        for (OrderKey key : topN.getOrderKeys()) {
+            ordering.add(ExpressionTranslator.translate(key.getExpr(), context));
+            ascending.add(key.isAsc());
+            nullsFirst.add(key.isNullFirst());
+        }
+        PartitionSortNode node = new PartitionSortNode(context.nextPlanNodeId(), input.getPlanRoot(),
+                WindowFuncType.ROW_NUMBER, groupExprs, new SortInfo(ordering, ascending, nullsFirst, tuple),
+                false, topN.getLimit() + topN.getOffset(), topN.isGlobal()
+                        ? PartitionTopnPhase.TWO_PHASE_GLOBAL_PTOPN : PartitionTopnPhase.TWO_PHASE_LOCAL_PTOPN);
+        node.setGroupTopN();
+        if (topN.isGlobal()) {
+            node.setPartitionOffset(topN.getOffset());
+        }
+        node.setNereidsId(topN.getId());
+        context.getNereidsIdToPlanNodeIdMap().put(topN.getId(), node.getId());
+        node.setChildrenDistributeExprLists(distributeExprLists);
+        if (topN.getStats() != null) {
+            node.setCardinality((long) topN.getStats().getRowCount());
+        }
+        addPlanRoot(input, node, topN);
+        return input;
+    }
 
     @Override
     public PlanFragment visitPhysicalDistribute(PhysicalDistribute<? extends Plan> distribute,

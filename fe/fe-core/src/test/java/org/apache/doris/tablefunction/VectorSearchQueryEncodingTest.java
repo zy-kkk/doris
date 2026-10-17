@@ -30,6 +30,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +40,73 @@ import java.util.Arrays;
 import java.util.Collections;
 
 public class VectorSearchQueryEncodingTest {
+
+    @Test
+    public void testBatchEncodingAndBudget() throws Exception {
+        for (ArrowType type : Arrays.asList(new ArrowType.Int(8, true), new ArrowType.Int(8, false),
+                new ArrowType.FloatingPoint(FloatingPointPrecision.HALF),
+                new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE),
+                new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE))) {
+            Field field = vectorField("embedding", type, 2);
+            TSearchVector batch = VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, "[[1,2],[1,2]]");
+            byte[] single = VectorSearchTableValuedFunction.parseAndEncodeQueryVector(field, "[1,2]").getValues();
+            Assertions.assertEquals(2, batch.getNumQueries());
+            Assertions.assertFalse(batch.isSetNumVectors());
+            Assertions.assertArrayEquals(single, Arrays.copyOfRange(batch.getValues(), 0, single.length));
+            Assertions.assertArrayEquals(single, Arrays.copyOfRange(batch.getValues(), single.length, single.length * 2));
+            VectorSearchTableValuedFunction.validateBatchBudget(batch, 9999, 1, 5);
+            Assertions.assertThrows(AnalysisException.class,
+                    () -> VectorSearchTableValuedFunction.validateBatchBudget(batch, 10000, 1, 5));
+            Assertions.assertThrows(AnalysisException.class,
+                    () -> VectorSearchTableValuedFunction.validateBatchBudget(batch, 1, Long.MAX_VALUE, 1));
+        }
+        Field field = vectorField("embedding", new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), 2);
+        for (String invalid : new String[] {"[]", "null", "[1,2]", "[[1]]", "[[1,2],[3]]", "[[null,2]]",
+                "[[NaN,2]]", "[[1,2],[Infinity,0]]", "[[1,2],[-Infinity,0]]", "[[1,2],[1e999,0]]",
+                "[[1,2],[-1e999,0]]", "[[1e100,2]]", "[[true,2]]", "[[[1],2]]", "not-json"}) {
+            Assertions.assertThrows(AnalysisException.class,
+                    () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, invalid), invalid);
+        }
+        for (boolean signed : new boolean[] {true, false}) {
+            Field integer = vectorField("embedding", new ArrowType.Int(8, signed), 2);
+            for (String invalid : signed
+                    ? new String[] {"[[1,2],[-129,0]]", "[[1,2],[128,0]]", "[[1,2],[1.5,0]]"}
+                    : new String[] {"[[1,2],[-1,0]]", "[[1,2],[256,0]]", "[[1,2],[1.5,0]]"}) {
+                Assertions.assertThrows(AnalysisException.class,
+                        () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(integer, invalid), invalid);
+            }
+        }
+        String matrix = "[" + String.join(",", Collections.nCopies(128, "[1,2]")) + "]";
+        Assertions.assertEquals(128, VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, matrix)
+                .getNumQueries());
+        Assertions.assertThrows(AnalysisException.class, () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(
+                field, "[" + String.join(",", Collections.nCopies(129, "[1,2]")) + "]"));
+        Field huge = vectorField("embedding", new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE), 10000000);
+        Assertions.assertThrows(AnalysisException.class,
+                () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(huge, "[[1]]"));
+    }
+
+    @Test
+    public void testBatchLimitsBeforeParsingRemainingInput() throws Exception {
+        Field field = vectorField("embedding", new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), 1);
+        AnalysisException count = Assertions.assertThrows(AnalysisException.class,
+                () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field,
+                        "[" + StringUtils.repeat("[0],", 128) + StringUtils.repeat("[", 10000)));
+        Assertions.assertTrue(count.getMessage().contains("1..128"));
+        AnalysisException dimension = Assertions.assertThrows(AnalysisException.class,
+                () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, StringUtils.repeat("[[0, [", 10000)));
+        Assertions.assertTrue(dimension.getMessage().contains("dimension 1"));
+        Field huge = vectorField("embedding", new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE), 10000000);
+        AnalysisException bytes = Assertions.assertThrows(AnalysisException.class,
+                () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(huge, StringUtils.repeat("[[", 10000)));
+        Assertions.assertTrue(bytes.getMessage().contains("64 MiB"));
+        for (String invalid : new String[] {"[[0]] true", "[[0]] [[1]]", "[[0],]", "[[\"0\"]]"}) {
+            Assertions.assertThrows(AnalysisException.class,
+                    () -> VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, invalid));
+        }
+        Assertions.assertEquals(1, VectorSearchTableValuedFunction.parseAndEncodeBatchQuery(field, "[[1e-3]]")
+                .getNumQueries());
+    }
 
     @Test
     public void testEncodesFloat32AsLittleEndianTypedVector() throws Exception {

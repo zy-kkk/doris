@@ -41,6 +41,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalEsScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalGenerate;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalJdbcScan;
@@ -98,6 +99,11 @@ public class ChildOutputPropertyDeriver extends PlanVisitor<PhysicalProperties, 
 
     public PhysicalProperties getOutputProperties(ConnectContext connectContext, GroupExpression groupExpression) {
         return groupExpression.getPlan().accept(this, new PlanContext(connectContext, groupExpression));
+    }
+
+    @Override
+    public PhysicalProperties visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, PlanContext context) {
+        return new PhysicalProperties(childrenOutputProperties.get(0).getDistributionSpec());
     }
 
     @Override

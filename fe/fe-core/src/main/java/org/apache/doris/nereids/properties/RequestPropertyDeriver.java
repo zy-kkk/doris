@@ -43,6 +43,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalCTEAnchor;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalDictionarySink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileSink;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHiveTableSink;
@@ -119,6 +120,12 @@ public class RequestPropertyDeriver extends PlanVisitor<Void, PlanContext> {
         requestPropertyToChildren = Lists.newArrayList();
         groupExpression.getPlan().accept(this, new PlanContext(connectContext, groupExpression));
         return requestPropertyToChildren;
+    }
+
+    @Override
+    public Void visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, PlanContext context) {
+        addRequestPropertyToChildren(topN.isGlobal() ? PhysicalProperties.GATHER : PhysicalProperties.ANY);
+        return null;
     }
 
     @Override

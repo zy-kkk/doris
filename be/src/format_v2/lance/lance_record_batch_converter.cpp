@@ -56,9 +56,10 @@ arrow::MemoryPool* LanceRecordBatchConverter::_query_arrow_memory_pool(
 
 Status LanceRecordBatchConverter::init(RuntimeState* runtime_state,
                                        const std::vector<ColumnDefinition>& projected_columns,
-                                       SearchKind search_kind) {
+                                       SearchKind search_kind, bool batch_search) {
     DORIS_CHECK(runtime_state != nullptr);
     _search_kind = search_kind;
+    _batch_search = batch_search;
     _timezone = runtime_state->timezone_obj();
     _memory_pool = _query_arrow_memory_pool(runtime_state);
     _output_columns.clear();
@@ -101,6 +102,10 @@ Status LanceRecordBatchConverter::init(RuntimeState* runtime_state,
             continue;
         }
         const auto output_index = _output_columns.size();
+        if (_batch_search && column.name == LANCE_QUERY_INDEX_COLUMN &&
+            remove_nullable(column.type)->get_primitive_type() != TYPE_INT) {
+            return Status::InvalidArgument("Lance query_index must have Doris INT type");
+        }
         if (!_output_index_by_input_name.emplace(column.name, output_index).second) {
             return Status::InvalidArgument("duplicate Lance projected column: {}", column.name);
         }
@@ -139,7 +144,8 @@ Status LanceRecordBatchConverter::_bind_schema(const std::shared_ptr<arrow::Sche
         if (output == _output_index_by_input_name.end()) {
             const bool is_omitted_search_result =
                     (_search_kind == SearchKind::VECTOR &&
-                     field->name() == LANCE_DISTANCE_COLUMN) ||
+                     (field->name() == LANCE_DISTANCE_COLUMN ||
+                      (_batch_search && field->name() == LANCE_QUERY_INDEX_COLUMN))) ||
                     (_search_kind == SearchKind::FULL_TEXT && field->name() == LANCE_SCORE_COLUMN);
             // Lance may return this generated result even when Doris did not project it.
             if (is_omitted_search_result) {

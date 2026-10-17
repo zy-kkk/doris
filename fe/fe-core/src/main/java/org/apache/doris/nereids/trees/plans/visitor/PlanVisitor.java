@@ -32,6 +32,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalCheckPolicy;
 import org.apache.doris.nereids.trees.plans.logical.LogicalExcept;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalHaving;
 import org.apache.doris.nereids.trees.plans.logical.LogicalInlineTable;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIntersect;
@@ -68,6 +69,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalDistribute;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalExcept;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalGenerate;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalIntersect;
@@ -291,6 +293,10 @@ public abstract class PlanVisitor<R, C> implements CommandVisitor<R, C>, Relatio
         return visit(alias, context);
     }
 
+    public R visitLogicalGroupTopN(LogicalGroupTopN<? extends Plan> topN, C context) {
+        return visit(topN, context);
+    }
+
     public R visitLogicalTopN(LogicalTopN<? extends Plan> topN, C context) {
         return visit(topN, context);
     }
@@ -417,6 +423,10 @@ public abstract class PlanVisitor<R, C> implements CommandVisitor<R, C>, Relatio
 
     public R visitPhysicalQuickSort(PhysicalQuickSort<? extends Plan> sort, C context) {
         return visitAbstractPhysicalSort(sort, context);
+    }
+
+    public R visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, C context) {
+        return visit(topN, context);
     }
 
     public R visitPhysicalTopN(PhysicalTopN<? extends Plan> topN, C context) {

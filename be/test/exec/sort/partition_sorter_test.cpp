@@ -65,6 +65,150 @@ struct PartitionSorterTest : public testing::Test {
     std::vector<bool> nulls_first {false};
 };
 
+TEST_F(PartitionSorterTest, PerPartitionOffsetAcrossBlocksAndReset) {
+    for (int batch_size : {1, 2, 4096}) {
+        _state._batch_size = batch_size;
+        for (int64_t offset : {0, 1, 4, 9, 20}) {
+            SCOPED_TRACE(offset);
+            SortCursorCmp previous;
+            sorter = PartitionSorter::create_unique(ordering_expr_ctxs, offset > 0 ? 1 : -1, offset,
+                                                    &pool, is_asc_order, nulls_first, *row_desc,
+                                                    &_state, nullptr, false, offset + 3,
+                                                    TopNAlgorithm::ROW_NUMBER, &previous);
+            sorter->init_profile(&_profile);
+            for (int iteration = 0; iteration < 2; ++iteration) {
+                if (iteration) sorter->reset_sorter_state(&_state);
+                for (int start : {0, 3, 6}) {
+                    Block block = ColumnHelper::create_block<DataTypeInt64>(
+                            {start + 2, start, start + 1});
+                    ASSERT_TRUE(sorter->append_block(&block).ok());
+                }
+                ASSERT_TRUE(sorter->prepare_for_read(false).ok());
+                bool eos = false;
+                std::vector<int64_t> actual;
+                int calls = 0;
+                while (!eos) {
+                    ASSERT_LT(calls++, 20);
+                    Block output;
+                    ASSERT_TRUE(sorter->get_next(&_state, &output, &eos).ok());
+                    for (size_t row = 0; row < output.rows(); ++row) {
+                        actual.push_back(output.get_by_position(0).column->get_int(row));
+                    }
+                }
+                std::vector<int64_t> expected;
+                for (int64_t value = offset; value < std::min<int64_t>(9, offset + 3); ++value) {
+                    expected.push_back(value);
+                }
+                EXPECT_EQ(expected, actual);
+                EXPECT_EQ(expected.size(), sorter->get_output_rows());
+            }
+        }
+    }
+}
+
+TEST_F(PartitionSorterTest, PerPartitionOffsetBoundsInterleavedBlocks) {
+    constexpr int64_t rows_per_block = 1024;
+    constexpr int64_t block_count = 3;
+    constexpr int64_t total_rows = rows_per_block * block_count;
+    constexpr int64_t top_k = 3;
+    for (bool ascending : {true, false}) {
+        is_asc_order = {ascending};
+        for (int64_t offset : {0, 1, 1025}) {
+            for (int64_t outer_limit : {-1, 1}) {
+                for (int batch_size : {1, 17}) {
+                    SCOPED_TRACE(::testing::Message() << ascending << ":" << offset << ":"
+                                                      << outer_limit << ":" << batch_size);
+                    _state._batch_size = batch_size;
+                    SortCursorCmp previous;
+                    sorter = PartitionSorter::create_unique(
+                            ordering_expr_ctxs, outer_limit, offset, &pool, is_asc_order,
+                            nulls_first, *row_desc, &_state, nullptr, false, offset + top_k,
+                            TopNAlgorithm::ROW_NUMBER, &previous);
+                    sorter->init_profile(&_profile);
+                    for (int iteration = 0; iteration < 2; ++iteration) {
+                        if (iteration != 0) {
+                            sorter->reset_sorter_state(&_state);
+                        }
+                        for (int64_t residue = 0; residue < block_count; ++residue) {
+                            std::vector<int64_t> values;
+                            for (int64_t row = rows_per_block; row > 0; --row) {
+                                values.push_back((row - 1) * block_count + residue);
+                            }
+                            Block input = ColumnHelper::create_block<DataTypeInt64>(values);
+                            ASSERT_TRUE(sorter->append_block(&input).ok());
+                        }
+                        // An outer LIMIT can reduce each block only when the partition offset is zero.
+                        const int64_t retained_rows = offset == 0 && outer_limit >= 0
+                                                              ? std::min(outer_limit, top_k)
+                                                              : offset + top_k;
+                        EXPECT_EQ(sorter->data_size(),
+                                  block_count * std::min(rows_per_block, retained_rows) *
+                                          sizeof(int64_t));
+                        ASSERT_TRUE(sorter->prepare_for_read(false).ok());
+                        std::vector<int64_t> actual;
+                        bool eos = false;
+                        int calls = 0;
+                        while (!eos) {
+                            ASSERT_LT(calls++, 10);
+                            Block output;
+                            ASSERT_TRUE(sorter->get_next(&_state, &output, &eos).ok());
+                            for (size_t row = 0; row < output.rows(); ++row) {
+                                actual.push_back(output.get_by_position(0).column->get_int(row));
+                            }
+                        }
+                        std::vector<int64_t> expected;
+                        for (int64_t rank = offset; rank < offset + top_k; ++rank) {
+                            expected.push_back(ascending ? rank : total_rows - 1 - rank);
+                        }
+                        EXPECT_EQ(expected, actual);
+                        EXPECT_EQ(top_k, sorter->get_output_rows());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(PartitionSorterTest, PartialSortPreservesRankTies) {
+    for (auto algorithm : {TopNAlgorithm::RANK, TopNAlgorithm::DENSE_RANK}) {
+        SortCursorCmp previous;
+        sorter = PartitionSorter::create_unique(ordering_expr_ctxs, -1, 0, &pool, is_asc_order,
+                                                nulls_first, *row_desc, &_state, nullptr, false, 2,
+                                                algorithm, &previous);
+        sorter->init_profile(&_profile);
+        Block input = ColumnHelper::create_block<DataTypeInt64>({3, 2, 2, 2, 1, 1, 1});
+        ASSERT_TRUE(sorter->append_block(&input).ok());
+        EXPECT_EQ(7 * sizeof(int64_t), sorter->data_size());
+        ASSERT_TRUE(sorter->prepare_for_read(false).ok());
+        Block output;
+        bool eos = false;
+        ASSERT_TRUE(sorter->get_next(&_state, &output, &eos).ok());
+        const std::vector<int64_t> expected = algorithm == TopNAlgorithm::RANK
+                                                      ? std::vector<int64_t> {1, 1, 1}
+                                                      : std::vector<int64_t> {1, 1, 1, 2, 2, 2};
+        EXPECT_TRUE(ColumnHelper::block_equal(output,
+                                              ColumnHelper::create_block<DataTypeInt64>(expected)));
+        EXPECT_TRUE(eos);
+    }
+}
+
+TEST_F(PartitionSorterTest, PartialSortUsesEffectiveRowNumber) {
+    sorter = PartitionSorter::create_unique(ordering_expr_ctxs, -1, 0, &pool, is_asc_order,
+                                            nulls_first, *row_desc, &_state, nullptr, true, 2,
+                                            TopNAlgorithm::DENSE_RANK, nullptr);
+    sorter->init_profile(&_profile);
+    Block input = ColumnHelper::create_block<DataTypeInt64>({3, 2, 2, 2, 1, 1, 1});
+    ASSERT_TRUE(sorter->append_block(&input).ok());
+    EXPECT_EQ(2 * sizeof(int64_t), sorter->data_size());
+    ASSERT_TRUE(sorter->prepare_for_read(false).ok());
+    Block output;
+    bool eos = false;
+    ASSERT_TRUE(sorter->get_next(&_state, &output, &eos).ok());
+    EXPECT_TRUE(
+            ColumnHelper::block_equal(output, ColumnHelper::create_block<DataTypeInt64>({1, 1})));
+    EXPECT_TRUE(eos);
+}
+
 TEST_F(PartitionSorterTest, test_partition_sorter_read_row_num) {
     sorter = PartitionSorter::create_unique(ordering_expr_ctxs, -1, 0, &pool, is_asc_order,
                                             nulls_first, *row_desc, &_state, nullptr, false, 20,

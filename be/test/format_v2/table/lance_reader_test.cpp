@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <lance/lance.hpp>
 #include <limits>
 #include <map>
@@ -45,7 +46,9 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -67,6 +70,7 @@
 #include "core/data_type/data_type_number.h"
 #include "core/data_type/data_type_string.h"
 #include "core/data_type/data_type_varbinary.h"
+#include "cpp/sync_point.h"
 #include "exec/common/endian.h"
 #include "exprs/create_predicate_function.h"
 #include "exprs/hybrid_set.h"
@@ -78,8 +82,10 @@
 #include "exprs/vliteral.h"
 #include "exprs/vslot_ref.h"
 #include "format_v2/lance/lance_reader_helper.h"
+#include "io/io_common.h"
 #include "runtime/runtime_profile.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "storage/utils.h"
 #include "util/defer_op.h"
 #include "util/timezone_utils.h"
@@ -468,6 +474,65 @@ TFileRangeDesc make_full_text_search_range(const std::filesystem::path& dataset_
     EXPECT_TRUE(get_index_segment_uuids(dataset_uri, index_name, &segment_uuids).ok());
     range.table_format_params.lance_params.__set_index_segment_uuids(std::move(segment_uuids));
     return range;
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchWireValidation) {
+    const Columns columns {projected_column("query_index", TYPE_INT, false),
+                           projected_column("_distance", TYPE_FLOAT, true)};
+    TQueryGlobals globals;
+    RuntimeState state(globals);
+    auto valid = make_float32_vector_search_params({1.0F, 2.0F, 3.0F}, 4, 0);
+    auto& request = valid.lance_scan_params.external_search_request;
+    request.__set_schema_version(2);
+    request.search_query.vector_search.query_vector.__set_num_queries(1);
+    const auto check = [&](TFileScanRangeParams params, bool expected) {
+        RuntimeProfile profile("batch_validation");
+        LanceTableReader reader;
+        EXPECT_EQ(expected, init_reader(&reader, columns, &state, &profile, &params).ok());
+    };
+    check(valid, true);
+    for (int mode = 0; mode < 10; ++mode) {
+        auto invalid = valid;
+        auto& r = invalid.lance_scan_params.external_search_request;
+        auto& v = r.search_query.vector_search;
+        auto& q = v.query_vector;
+        switch (mode) {
+        case 0:
+            r.__set_schema_version(1);
+            break;
+        case 1:
+            q.__isset.num_queries = false;
+            break;
+        case 2:
+            q.__set_num_vectors(1);
+            break;
+        case 3:
+            q.__set_num_queries(0);
+            break;
+        case 4:
+            q.__set_num_queries(129);
+            break;
+        case 5:
+            q.__set_num_queries(2);
+            break;
+        case 6:
+            v.__set_offset(1);
+            break;
+        case 7:
+            v.__set_distance_lower_bound(0);
+            break;
+        case 8:
+            v.__set_top_k(100001);
+            break;
+        case 9:
+            TVectorSearchOptions options;
+            options.__set_refine_factor(25001);
+            r.__set_vector_search_options(options);
+            break;
+        }
+        SCOPED_TRACE(mode);
+        check(invalid, false);
+    }
 }
 
 TEST(LanceTableReaderVectorSearchTest, RejectsMalformedVectorPayloadBeforeReadingIt) {
@@ -1638,6 +1703,420 @@ TEST(LanceTableReaderVectorSearchTest, ValidatesDistanceRangeBeforeDatasetAccess
         EXPECT_NE(std::string::npos,
                   status.to_string().find(mode == 5 ? "multi-vector" : "distance"));
     }
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchMatchesSingleQueriesWithOptionalGeneratedColumns) {
+    const std::filesystem::path uri = "./be/test/format_v2/table/lance/data/all_types.lance";
+    LanceFixtureInfo fixture;
+    ASSERT_TRUE(get_fixture_info(uri, &fixture).ok());
+    TQueryGlobals globals;
+    RuntimeState state(globals);
+    const Columns single_columns {projected_column("row_id", TYPE_BIGINT, false),
+                                  projected_column("_distance", TYPE_FLOAT, true)};
+    std::vector<std::array<float, 3>> queries {{0, 0, 0}, {1, 2, 3}, {0, 0, 0}};
+    for (bool empty : {false, true}) {
+        std::string encoded;
+        std::vector<std::vector<std::pair<int64_t, float>>> expected;
+        for (const auto& query : queries) {
+            auto params = make_float32_vector_search_params(
+                    query, 2, 0, empty ? std::optional<std::string>("row_id < 0") : std::nullopt);
+            encoded += params.lance_scan_params.external_search_request.search_query.vector_search
+                               .query_vector.values;
+            RuntimeProfile profile("single_oracle");
+            LanceTableReader reader;
+            ASSERT_TRUE(init_reader(&reader, single_columns, &state, &profile, &params).ok());
+            ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+            Block block;
+            add_output_columns(&block, single_columns);
+            auto rows = read_vector_search_rows(&reader, &block);
+            std::sort(rows.begin(), rows.end());
+            expected.push_back(rows);
+            ASSERT_TRUE(reader.close().ok());
+        }
+        for (int projected = 0; projected < 4; ++projected) {
+            Columns columns {single_columns[0]};
+            if (projected & 1) columns.push_back(single_columns[1]);
+            if (projected & 2) columns.push_back(projected_column("query_index", TYPE_INT, false));
+            auto params = make_float32_vector_search_params(
+                    queries[0], 2, 0,
+                    empty ? std::optional<std::string>("row_id < 0") : std::nullopt);
+            auto& request = params.lance_scan_params.external_search_request;
+            request.__set_schema_version(2);
+            request.search_query.vector_search.query_vector.__set_values(encoded);
+            request.search_query.vector_search.query_vector.__set_num_queries(queries.size());
+            RuntimeProfile profile("batch_projection");
+            LanceTableReader reader;
+            ASSERT_TRUE(init_reader(&reader, columns, &state, &profile, &params).ok());
+            ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+            Block block;
+            add_output_columns(&block, columns);
+            std::vector<std::vector<std::pair<int64_t, float>>> actual(queries.size());
+            size_t total = 0;
+            bool eos = false;
+            while (!eos) {
+                ASSERT_TRUE(reader.get_block(&block, &eos).ok());
+                if (eos) continue;
+                total += block.rows();
+                if (projected == 3) {
+                    const auto& distances =
+                            assert_cast<const ColumnNullable&>(*block.get_by_position(1).column);
+                    const auto& values =
+                            assert_cast<const ColumnFloat32&>(distances.get_nested_column());
+                    for (size_t row = 0; row < block.rows(); ++row) {
+                        auto query = block.get_by_position(2).column->get_int(row);
+                        ASSERT_GE(query, 0);
+                        ASSERT_LT(query, queries.size());
+                        actual[query].emplace_back(block.get_by_position(0).column->get_int(row),
+                                                   values.get_data()[row]);
+                    }
+                }
+            }
+            size_t expected_total = 0;
+            for (size_t i = 0; i < queries.size(); ++i) {
+                expected_total += expected[i].size();
+                if (projected == 3) {
+                    std::sort(actual[i].begin(), actual[i].end());
+                    EXPECT_EQ(expected[i], actual[i]);
+                }
+            }
+            EXPECT_EQ(expected_total, total);
+            ASSERT_TRUE(reader.close().ok());
+        }
+    }
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchStopAbortAndReprepare) {
+    const std::filesystem::path uri = "./be/test/format_v2/table/lance/data/all_types.lance";
+    LanceFixtureInfo fixture;
+    ASSERT_TRUE(get_fixture_info(uri, &fixture).ok());
+    const Columns columns {projected_column("row_id", TYPE_BIGINT, false),
+                           projected_column("_distance", TYPE_FLOAT, true)};
+    TQueryGlobals globals;
+    RuntimeState state(globals);
+    auto params = make_float32_vector_search_params({0, 0, 0}, 2, 0);
+    auto& request = params.lance_scan_params.external_search_request;
+    request.__set_schema_version(2);
+    auto& query = request.search_query.vector_search.query_vector;
+    query.__set_values(query.values + query.values);
+    query.__set_num_queries(2);
+    RuntimeProfile profile("batch_stop_abort");
+    auto io_ctx = std::make_shared<io::IOContext>();
+    LanceTableReader reader;
+    ASSERT_TRUE(reader.init({.projected_columns = columns,
+                             .conjuncts = {},
+                             .format = FileFormat::LANCE,
+                             .scan_params = &params,
+                             .io_ctx = io_ctx,
+                             .runtime_state = &state,
+                             .scanner_profile = &profile})
+                        .ok());
+    reader.set_batch_size(1);
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    Block block;
+    add_output_columns(&block, columns);
+    auto expected = read_vector_search_rows(&reader, &block);
+    ASSERT_FALSE(expected.empty());
+    std::sort(expected.begin(), expected.end());
+
+    for (bool read_before_stop : {false, true}) {
+        SCOPED_TRACE(read_before_stop);
+        ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+        ASSERT_NE(nullptr, reader._scanner);
+        bool eos = false;
+        if (read_before_stop) {
+            ASSERT_TRUE(reader.get_block(&block, &eos).ok());
+            ASSERT_FALSE(eos);
+            ASSERT_GT(block.rows(), 0);
+        }
+        io_ctx->should_stop = true;
+        ASSERT_TRUE(reader.get_block(&block, &eos).ok());
+        EXPECT_TRUE(eos);
+        EXPECT_EQ(0, block.rows());
+        EXPECT_EQ(nullptr, reader._scanner);
+        EXPECT_EQ(0, reader._scanner_batch_size);
+        // The dataset belongs to the table reader and remains open between splits.
+        EXPECT_NE(nullptr, reader._dataset);
+        ASSERT_TRUE(reader.abort_split().ok());
+        ASSERT_TRUE(reader.abort_split().ok());
+        io_ctx->should_stop = false;
+        ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+        auto actual = read_vector_search_rows(&reader, &block);
+        std::sort(actual.begin(), actual.end());
+        EXPECT_EQ(expected, actual);
+    }
+
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    ASSERT_NE(nullptr, reader._scanner);
+    ASSERT_TRUE(reader.abort_split().ok());
+    EXPECT_EQ(nullptr, reader._scanner);
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    auto actual = read_vector_search_rows(&reader, &block);
+    std::sort(actual.begin(), actual.end());
+    EXPECT_EQ(expected, actual);
+    ASSERT_TRUE(reader.close().ok());
+    ASSERT_TRUE(reader.close().ok());
+    EXPECT_EQ(nullptr, reader._scanner);
+    EXPECT_EQ(nullptr, reader._dataset);
+}
+
+TEST(LanceTableReaderVectorSearchTest, IOContextStopCopiesKeepIndependentSnapshots) {
+    static_assert(std::is_aggregate_v<io::IOContext>);
+    io::IOContext original;
+    original.should_stop = true;
+    original.expiration_time = 17;
+    auto copied = original;
+    EXPECT_TRUE(copied.should_stop);
+    EXPECT_EQ(17, copied.expiration_time);
+    original.should_stop = false;
+    EXPECT_TRUE(copied.should_stop);
+    EXPECT_FALSE(original.should_stop);
+
+    io::IOContext assigned;
+    assigned = copied;
+    EXPECT_TRUE(assigned.should_stop);
+    EXPECT_EQ(17, assigned.expiration_time);
+    copied.should_stop = false;
+    EXPECT_TRUE(assigned.should_stop);
+    assigned.should_stop = original.should_stop;
+    EXPECT_FALSE(assigned.should_stop);
+    // Buffered readers use this exact copying form to retain per-call I/O options.
+    auto shared_copy = std::make_shared<io::IOContext>(original);
+    original.should_stop = true;
+    EXPECT_FALSE(shared_copy->should_stop);
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchCancelsWhilePollWaitsWithoutNotification) {
+    for (bool query_cancel : {false, true}) {
+        SCOPED_TRACE(query_cancel ? "query cancellation" : "scanner stop");
+        const std::filesystem::path uri = "./be/test/format_v2/table/lance/data/all_types.lance";
+        LanceFixtureInfo fixture;
+        ASSERT_TRUE(get_fixture_info(uri, &fixture).ok());
+        const Columns columns {projected_column("row_id", TYPE_BIGINT, false),
+                               projected_column("_distance", TYPE_FLOAT, true)};
+        TQueryGlobals globals;
+        RuntimeState state(globals);
+        RuntimeProfile profile("batch_cancel_pending");
+        auto params = make_float32_vector_search_params({0, 0, 0}, 2, 0);
+        auto& request = params.lance_scan_params.external_search_request;
+        request.__set_schema_version(2);
+        request.search_query.vector_search.query_vector.__set_num_queries(1);
+        auto io_ctx = std::make_shared<io::IOContext>();
+        LanceTableReader reader;
+        ASSERT_TRUE(reader.init({.projected_columns = columns,
+                                 .conjuncts = {},
+                                 .format = FileFormat::LANCE,
+                                 .scan_params = &params,
+                                 .io_ctx = io_ctx,
+                                 .runtime_state = &state,
+                                 .scanner_profile = &profile})
+                            .ok());
+        ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+        Block block;
+        add_output_columns(&block, columns);
+
+        auto* sp = SyncPoint::get_instance();
+        SyncPoint::CallbackGuard poll_guard;
+        SyncPoint::CallbackGuard wait_guard;
+        std::promise<void> waiting;
+        auto waiting_future = waiting.get_future();
+        bool wait_seen = false;
+        int polls = 0;
+        sp->set_call_back(
+                "LanceTableReader::poll_next",
+                [&](auto&& args) {
+                    ++polls;
+                    auto* result = try_any_cast_ret<LancePollStatus>(args);
+                    result->first = LANCE_POLL_PENDING;
+                    result->second = true;
+                },
+                &poll_guard);
+        sp->set_call_back(
+                "LanceTableReader::poll_wait",
+                [&](auto&&) {
+                    if (!wait_seen) {
+                        wait_seen = true;
+                        waiting.set_value();
+                    }
+                },
+                &wait_guard);
+        sp->enable_processing();
+        Defer disable_sync_points([&] { sp->disable_processing(); });
+        // The poll has returned PENDING before the signal. Both cancellation sources are atomic;
+        // the cancelling thread needs neither the reader's mutex nor a waker notification.
+        std::thread cancel([&] {
+            SCOPED_ATTACH_TASK(ExecEnv::GetInstance()->orphan_mem_tracker());
+            EXPECT_EQ(std::future_status::ready, waiting_future.wait_for(std::chrono::seconds(5)));
+            if (query_cancel) {
+                state.cancel(Status::Cancelled("cancel pending Lance batch"));
+            } else {
+                io_ctx->should_stop = true;
+            }
+            // No waker notification: the short timeout must detect cancellation itself.
+        });
+        bool eos = false;
+        const auto status = reader.get_block(&block, &eos);
+        cancel.join();
+        if (query_cancel) {
+            EXPECT_TRUE(status.is<ErrorCode::CANCELLED>()) << status.to_string();
+            EXPECT_NE(std::string::npos, status.to_string().find("cancel pending Lance batch"));
+        } else {
+            EXPECT_TRUE(status.ok()) << status.to_string();
+        }
+        EXPECT_TRUE(wait_seen);
+        EXPECT_EQ(1, polls);
+        EXPECT_EQ(!query_cancel, eos);
+        EXPECT_EQ(0, block.rows());
+        EXPECT_EQ(nullptr, reader._scanner);
+        EXPECT_EQ(0, reader._scanner_batch_size);
+        EXPECT_NE(nullptr, reader._dataset);
+        ASSERT_TRUE(reader.close().ok());
+    }
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchEarlyWakeAndContextSurviveReadUntilClose) {
+    const std::filesystem::path uri = "./be/test/format_v2/table/lance/data/all_types.lance";
+    LanceFixtureInfo fixture;
+    ASSERT_TRUE(get_fixture_info(uri, &fixture).ok());
+    const Columns columns {projected_column("row_id", TYPE_BIGINT, false),
+                           projected_column("_distance", TYPE_FLOAT, true)};
+    TQueryGlobals globals;
+    RuntimeState state(globals);
+    RuntimeProfile profile("batch_waker_lifetime");
+    auto params = make_float32_vector_search_params({0, 0, 0}, 2, 0);
+    auto& request = params.lance_scan_params.external_search_request;
+    request.__set_schema_version(2);
+    request.search_query.vector_search.query_vector.__set_num_queries(1);
+    LanceTableReader reader;
+    ASSERT_TRUE(init_reader(&reader, columns, &state, &profile, &params).ok());
+    reader.set_batch_size(1);
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    Block block;
+    add_output_columns(&block, columns);
+
+    auto* sp = SyncPoint::get_instance();
+    SyncPoint::CallbackGuard poll_guard;
+    SyncPoint::CallbackGuard close_guard;
+    SyncPoint::CallbackGuard wait_guard;
+    LanceWaker retained_wake = nullptr;
+    void* retained_ctx = nullptr;
+    bool early_wake = false;
+    bool repolled = false;
+    sp->set_call_back(
+            "LanceTableReader::poll_next",
+            [&](auto&& args) {
+                retained_wake = try_any_cast<LanceWaker>(args[0]);
+                retained_ctx = try_any_cast<void*>(args[1]);
+                EXPECT_EQ(static_cast<void*>(&reader._scanner_waker), retained_ctx);
+                if (!early_wake) {
+                    early_wake = true;
+                    // A Tokio worker can wake before poll_next returns PENDING. The reader must
+                    // preserve that notification and re-poll without waiting for another wake.
+                    retained_wake(retained_ctx);
+                    auto* result = try_any_cast_ret<LancePollStatus>(args);
+                    result->first = LANCE_POLL_PENDING;
+                    result->second = true;
+                } else {
+                    repolled = true;
+                }
+            },
+            &poll_guard);
+    sp->set_call_back(
+            "LanceTableReader::poll_wait",
+            [&](auto&&) {
+                if (!repolled) {
+                    ADD_FAILURE() << "Lost the wake issued before poll_next returned PENDING";
+                    state.cancel(Status::Cancelled("lost early Lance wake"));
+                }
+            },
+            &wait_guard);
+    sp->enable_processing();
+    Defer disable_sync_points([&] { sp->disable_processing(); });
+    bool eos = false;
+    ASSERT_TRUE(reader.get_block(&block, &eos).ok());
+    ASSERT_TRUE(early_wake);
+    ASSERT_FALSE(eos);
+    ASSERT_GT(block.rows(), 0);
+    ASSERT_NE(nullptr, reader._scanner);
+    ASSERT_NE(nullptr, retained_wake);
+    // An older poll's RawWaker can remain retained after a READY result or get_block return.
+    // Exercise its context from another thread after the polling stack has gone away.
+    std::thread late_wake([&] { retained_wake(retained_ctx); });
+    late_wake.join();
+    EXPECT_TRUE(reader._scanner_waker.notified);
+    bool close_seen = false;
+    sp->set_call_back(
+            "LanceTableReader::scanner_closed",
+            [&](auto&&) {
+                close_seen = true;
+                // The context is valid through the close boundary, after lance-c has retired
+                // real registrations. This simulated retained callback checks Doris ownership.
+                std::thread closing_wake([&] { retained_wake(retained_ctx); });
+                closing_wake.join();
+            },
+            &close_guard);
+    ASSERT_TRUE(reader.close().ok());
+    EXPECT_TRUE(close_seen);
+    EXPECT_EQ(nullptr, reader._scanner);
+}
+
+TEST(LanceTableReaderVectorSearchTest, BatchFailuresAbortAndReprepare) {
+    const std::filesystem::path uri = "./be/test/format_v2/table/lance/data/all_types.lance";
+    LanceFixtureInfo fixture;
+    ASSERT_TRUE(get_fixture_info(uri, &fixture).ok());
+    const Columns columns {projected_column("row_id", TYPE_BIGINT, false),
+                           projected_column("_distance", TYPE_FLOAT, true)};
+    TQueryGlobals globals;
+    RuntimeState state(globals);
+    auto params = make_float32_vector_search_params({0, 0, 0}, 2, 0);
+    auto& request = params.lance_scan_params.external_search_request;
+    request.__set_schema_version(2);
+    auto& vector = request.search_query.vector_search;
+    vector.query_vector.__set_values(vector.query_vector.values + vector.query_vector.values);
+    vector.query_vector.__set_num_queries(2);
+    RuntimeProfile profile("batch_failures_abort");
+    LanceTableReader reader;
+    ASSERT_TRUE(init_reader(&reader, columns, &state, &profile, &params).ok());
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    Block block;
+    add_output_columns(&block, columns);
+    auto expected = read_vector_search_rows(&reader, &block);
+    ASSERT_FALSE(expected.empty());
+    std::sort(expected.begin(), expected.end());
+
+    auto invalid_range = make_lance_range(uri, fixture.version, fixture.fragment_ids);
+    invalid_range.table_format_params.lance_params.__set_index_segment_uuids({"too-short"});
+    const auto prepare_status = prepare_range(&reader, std::move(invalid_range));
+    ASSERT_FALSE(prepare_status.ok());
+    EXPECT_NE(std::string::npos, prepare_status.to_string().find("must contain 16 bytes"));
+    EXPECT_EQ(nullptr, reader._scanner);
+    ASSERT_TRUE(reader.abort_split().ok());
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    auto after_prepare_error = read_vector_search_rows(&reader, &block);
+    std::sort(after_prepare_error.begin(), after_prepare_error.end());
+    EXPECT_EQ(expected, after_prepare_error);
+
+    // The scanner stores the SQL filter during setup and parses it on the first read.
+    TSearchFilter invalid_filter;
+    invalid_filter.__set_format(TSearchFilterFormat::SQL);
+    invalid_filter.__set_payload("row_id =");
+    request.__set_search_filter(invalid_filter);
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    bool eos = false;
+    const auto read_status = reader.get_block(&block, &eos);
+    ASSERT_FALSE(read_status.ok());
+    EXPECT_NE(std::string::npos, read_status.to_string().find("read next Lance batch"));
+    ASSERT_TRUE(reader.abort_split().ok());
+    EXPECT_EQ(nullptr, reader._scanner);
+    EXPECT_EQ(0, reader._scanner_batch_size);
+    request.__isset.search_filter = false;
+    ASSERT_TRUE(prepare_fixture(&reader, uri, fixture, fixture.fragment_ids).ok());
+    auto after_read_error = read_vector_search_rows(&reader, &block);
+    std::sort(after_read_error.begin(), after_read_error.end());
+    EXPECT_EQ(expected, after_read_error);
+    ASSERT_TRUE(reader.close().ok());
+    ASSERT_TRUE(reader.close().ok());
+    EXPECT_EQ(nullptr, reader._scanner);
+    EXPECT_EQ(nullptr, reader._dataset);
 }
 
 TEST(LanceTableReaderVectorSearchTest, AppliesDistanceBoundsAndOffset) {

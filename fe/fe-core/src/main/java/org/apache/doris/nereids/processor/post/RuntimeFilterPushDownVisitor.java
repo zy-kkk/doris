@@ -34,6 +34,7 @@ import org.apache.doris.nereids.trees.plans.JoinType;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.physical.AbstractPhysicalJoin;
 import org.apache.doris.nereids.trees.plans.physical.AbstractPhysicalPlan;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalLazyMaterializeOlapScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalNestedLoopJoin;
@@ -167,6 +168,11 @@ public class RuntimeFilterPushDownVisitor extends PlanVisitor<Boolean, PushDownC
             }
             return expression;
         }
+    }
+
+    @Override
+    public Boolean visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, PushDownContext ctx) {
+        return false;
     }
 
     @Override

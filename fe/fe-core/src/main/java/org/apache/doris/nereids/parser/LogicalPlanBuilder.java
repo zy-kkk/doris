@@ -2886,7 +2886,7 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                     }
                     if (argument.value.constant() instanceof DorisParser.PlaceholderContext) {
                         // Bounds change the search results, but never the prepared result schema.
-                        if (!ImmutableSet.of("query_vector", "top_k", "offset", "filter",
+                        if (!ImmutableSet.of("query_vector", "query_vectors", "top_k", "offset", "filter",
                                 "distance_lower_bound", "distance_upper_bound").contains(key)) {
                             throw new AnalysisException("vector_search property '" + key
                                     + "' must be constant in a prepared statement");
@@ -2895,6 +2895,13 @@ public class LogicalPlanBuilder extends DorisParserBaseVisitor<Object> {
                     } else {
                         map.put(key, parsePropertyValue(argument.value));
                     }
+                }
+                if (keys.contains("query_vectors") && keys.contains("query_vector")) {
+                    throw new AnalysisException("'query_vector' and 'query_vectors' are mutually exclusive");
+                }
+                if (keys.contains("query_vectors")
+                        && (keys.contains("distance_lower_bound") || keys.contains("distance_upper_bound"))) {
+                    throw new AnalysisException("Distance bounds are not supported for Lance batch vector search");
                 }
             } else {
                 if ("full_text_search".equalsIgnoreCase(functionName) && ctx.properties != null) {

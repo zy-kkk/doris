@@ -79,6 +79,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalExcept;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFileScan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalHudiScan;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIntersect;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJdbcScan;
@@ -112,6 +113,7 @@ import org.apache.doris.nereids.trees.plans.physical.PhysicalExcept;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFileScan;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalFilter;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalGenerate;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashAggregate;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalHashJoin;
 import org.apache.doris.nereids.trees.plans.physical.PhysicalIntersect;
@@ -366,6 +368,21 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
         StatsCalculator statsCalculator = new StatsCalculator(groupExpression, false,
                 new HashMap<>(), false, Collections.emptyMap(), context);
         statsCalculator.estimate();
+    }
+
+    @Override
+    public Statistics visitPhysicalGroupTopN(PhysicalGroupTopN<? extends Plan> topN, Void context) {
+        Statistics inputStats = groupExpression.childStatistics(0);
+        // Each local driver owns a window, so its aggregate output need not fit one window.
+        return topN.isGlobal()
+                ? computeGroupTopN(topN.getGroupKeys(), topN.getLimit(), topN.getOffset(), inputStats)
+                : inputStats.cleanHotValues().build();
+    }
+
+    @Override
+    public Statistics visitLogicalGroupTopN(LogicalGroupTopN<? extends Plan> topN, Void context) {
+        return computeGroupTopN(topN.getGroupKeys(), topN.getLimit(), topN.getOffset(),
+                groupExpression.childStatistics(0));
     }
 
     @Override
@@ -1368,6 +1385,19 @@ public class StatsCalculator extends DefaultPlanVisitor<Statistics, Void> {
     public Statistics computeTopN(TopN topN, Statistics inputStats) {
         return inputStats.cleanHotValues().build()
                 .withRowCountAndEnforceValid(Math.min(inputStats.getRowCount(), topN.getLimit()));
+    }
+
+    /**
+     * Estimate the row-count bound after applying each group's limit and offset.
+     */
+    public Statistics computeGroupTopN(List<Expression> groupKeys, long limit, long offset,
+            Statistics inputStats) {
+        double inputRows = inputStats.getRowCount();
+        double groups = estimateGroupByRowCount(groupKeys, inputStats);
+        // A surviving group consumes at least offset rows. Subtracting offset once is an upper
+        // bound even when groups have unequal sizes; subtracting groups * offset is not.
+        double rows = Math.min(Math.max(0, inputRows - offset), groups * limit);
+        return inputStats.cleanHotValues().build().withRowCountAndEnforceValid(rows);
     }
 
     /**

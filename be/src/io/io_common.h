@@ -20,6 +20,7 @@
 #include <gen_cpp/Types_types.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -222,6 +223,23 @@ struct FileCacheStatistics {
 };
 
 struct IOContext {
+    // Scanner stop requests race with reader I/O. Copies retain an independent snapshot, as
+    // IOContext copies are also used for per-call I/O options rather than shared cancellation.
+    class StopFlag {
+    public:
+        StopFlag(bool value = false) : _value(value) {}
+        StopFlag(const StopFlag& other) : _value(static_cast<bool>(other)) {}
+        StopFlag& operator=(const StopFlag& other) { return *this = static_cast<bool>(other); }
+        StopFlag& operator=(bool value) {
+            _value.store(value, std::memory_order_release);
+            return *this;
+        }
+        operator bool() const { return _value.load(std::memory_order_acquire); }
+
+    private:
+        std::atomic<bool> _value;
+    };
+
     ReaderType reader_type = ReaderType::UNKNOWN;
     // FIXME(plat1ko): Seems `is_disposable` can be inferred from the `reader_type`?
     bool is_disposable = false;
@@ -230,7 +248,7 @@ struct IOContext {
     // TODO(lightman): use following member variables to control file cache
     bool is_persistent = false;
     // stop reader when reading, used in some interrupted operations
-    bool should_stop = false;
+    StopFlag should_stop = false;
     int64_t expiration_time = 0;
     const TUniqueId* query_id = nullptr;             // Ref
     FileCacheStatistics* file_cache_stats = nullptr; // Ref

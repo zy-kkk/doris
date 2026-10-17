@@ -232,6 +232,11 @@ public class MaterializeProbeVisitor extends DefaultPlanVisitor<Optional<Materia
     @Override
     public Optional<MaterializeSource> visitPhysicalTVFRelation(
             PhysicalTVFRelation tvfRelation, ProbeContext context) {
+        if (VectorSearchTableValuedFunction.QUERY_INDEX_COLUMN.equals(context.slot.getName())
+                && tvfRelation.getFunction().getCatalogFunction() instanceof VectorSearchTableValuedFunction
+                && ((VectorSearchTableValuedFunction) tvfRelation.getFunction().getCatalogFunction()).isBatchSearch()) {
+            return Optional.empty();
+        }
         // The first Lance implementation fetches top-level columns by row ID. Keep nested
         // sub-column projections in the search phase until take_rows supports access paths.
         if (isLanceExternalSearch(tvfRelation) && context.slot.hasSubColPath()) {

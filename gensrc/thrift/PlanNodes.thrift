@@ -62,7 +62,10 @@ enum TPlanNodeType {
   GROUP_COMMIT_SCAN_NODE = 33,
   MATERIALIZATION_NODE = 34,
   REC_CTE_NODE = 35,
-  REC_CTE_SCAN_NODE = 36
+  REC_CTE_SCAN_NODE = 36,
+  // IDs 37 and 38 are reserved for master BUCKETED_AGGREGATION_NODE and LOCAL_EXCHANGE_NODE.
+  // Final per-group top-N; uses TPartitionSortNode, but requires batch-aware backends.
+  GROUP_TOPN_NODE = 39
 }
 
 struct TKeyRange {
@@ -477,6 +480,8 @@ struct TSearchVector {
     3: optional binary values
     // Present only for one multi-vector query; values contains a row-major matrix.
     4: optional i32 num_vectors
+    // Independent single-vector queries; mutually exclusive with num_vectors. Requires schema version 2.
+    5: optional i32 num_queries
 }
 
 // Logical result parameters for one vector query. `top_k` is the number of rows returned after
@@ -1431,6 +1436,8 @@ enum TPartTopNPhase {
    4: optional TopNAlgorithm top_n_algorithm
    5: optional i64 partition_inner_limit
    6: optional TPartTopNPhase ptopn_phase
+   // Per-partition offset, only for ROW_NUMBER in TWO_PHASE_GLOBAL.
+   7: optional i64 partition_offset
  }
 enum TAnalyticWindowType {
   // Specifies the window as a logical offset

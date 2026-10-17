@@ -38,15 +38,23 @@ PartitionSorter::PartitionSorter(const VExprContextSPtrs& ordering_expr_ctxs, in
                                  RuntimeState* state, RuntimeProfile* profile,
                                  bool has_global_limit, int64_t partition_inner_limit,
                                  TopNAlgorithm::type top_n_algorithm, SortCursorCmp* previous_row)
-        : Sorter(ordering_expr_ctxs, state, limit, offset, pool, is_asc_order, nulls_first),
-          _state(MergeSorterState::create_unique(row_desc, offset)),
+        : Sorter(ordering_expr_ctxs, state, limit, 0, pool, is_asc_order, nulls_first),
+          _state(MergeSorterState::create_unique(row_desc, 0)),
           _row_desc(row_desc),
           _partition_inner_limit(partition_inner_limit),
+          _partition_offset(offset),
           _top_n_algorithm(
                   has_global_limit
                           ? TopNAlgorithm::ROW_NUMBER
                           : top_n_algorithm), // FE will make this modification, but still maintain this code for compatibility
-          _previous_row(previous_row) {}
+          _previous_row(previous_row) {
+    if (_top_n_algorithm == TopNAlgorithm::ROW_NUMBER && partition_inner_limit >= 0) {
+        // Keep K + offset candidates per block. Apply an outer LIMIT only without offset;
+        // RANK and DENSE_RANK must retain ties beyond the row-count bound.
+        _limit = offset > 0 || limit < 0 ? partition_inner_limit
+                                         : std::min(limit, partition_inner_limit);
+    }
+}
 
 Status PartitionSorter::append_block(Block* input_block) {
     Block sorted_block = VectorizedUtils::create_empty_columnswithtypename(_row_desc);
@@ -84,6 +92,7 @@ void PartitionSorter::reset_sorter_state(RuntimeState* runtime_state) {
         _previous_row->reset();
     }
     _output_total_rows = 0;
+    _consumed_rows = 0;
     _output_distinct_rows = 0;
     _prepared_finish = false;
 }
@@ -107,16 +116,30 @@ Status PartitionSorter::_read_row_num(Block* output_block, bool* eos, int batch_
     size_t merged_rows = 0;
 
     Defer defer {[&]() {
-        if (merged_rows == 0 || _get_enough_data()) {
+        if (!queue.is_valid() || _consumed_rows >= _partition_inner_limit) {
             *eos = true;
         }
     }};
 
-    while (queue.is_valid() && merged_rows < batch_size && !_get_enough_data()) {
+    while (queue.is_valid() && merged_rows < batch_size &&
+           _consumed_rows < _partition_inner_limit) {
         auto [current, current_rows] = queue.current();
 
+        if (_consumed_rows < _partition_offset) {
+            size_t skipped = std::min<int64_t>(
+                    current_rows,
+                    std::min(_partition_offset, _partition_inner_limit) - _consumed_rows);
+            _consumed_rows += skipped;
+            if (current->impl->is_last(skipped)) {
+                queue.remove_top();
+            } else {
+                queue.next(skipped);
+            }
+            continue;
+        }
+
         // row_number no need to check distinct, just output partition_inner_limit row
-        size_t needed_rows = _partition_inner_limit - _output_total_rows;
+        size_t needed_rows = _partition_inner_limit - _consumed_rows;
         size_t step = std::min(needed_rows, std::min(current_rows, batch_size - merged_rows));
 
         if (current->impl->is_last(step) && current->impl->pos == 0) {
@@ -130,6 +153,7 @@ Status PartitionSorter::_read_row_num(Block* output_block, bool* eos, int batch_
             output_block->swap(*current->impl->block);
             merged_rows += step;
             _output_total_rows += step;
+            _consumed_rows += step;
             queue.remove_top();
             return Status::OK();
         }
@@ -137,6 +161,7 @@ Status PartitionSorter::_read_row_num(Block* output_block, bool* eos, int batch_
         if (step) {
             merged_rows += step;
             _output_total_rows += step;
+            _consumed_rows += step;
             for (size_t i = 0; i < num_columns; ++i) {
                 merged_columns[i]->insert_range_from(*current->impl->columns[i], current->impl->pos,
                                                      step);

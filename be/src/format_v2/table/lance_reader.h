@@ -17,9 +17,11 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -103,6 +105,14 @@ private:
     LanceDataset* _dataset = nullptr;
     std::shared_ptr<arrow::Schema> _dataset_schema;
     LanceScanner* _scanner = nullptr;
+    // All polls share this context. lance_scanner_close retires even retained wakers before the
+    // reader destroys it; neither polling nor close holds its mutex while entering lance-c.
+    struct ScannerWaker {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool notified = false;
+    } _scanner_waker;
+    bool _batch_search = false;
     ShardedKVCache* _runtime_filter_cache = nullptr;
     std::optional<DatasetKey> _opened_dataset_key;
     // Sorted fragment ids of the opened snapshot, listed on the first split that names any.
@@ -114,6 +124,10 @@ private:
     RuntimeProfile::Counter* _planned_index_segment_count = nullptr;
     RuntimeProfile::Counter* _planned_indexed_fragment_count = nullptr;
     RuntimeProfile::Counter* _planned_flat_search_fragment_count = nullptr;
+    RuntimeProfile::Counter* _batch_shared_index_splits = nullptr;
+    RuntimeProfile::Counter* _batch_per_query_index_splits = nullptr;
+    RuntimeProfile::Counter* _batch_flat_splits = nullptr;
+    bool _batch_indexed_split = false;
     RuntimeProfile::Counter* _dataset_open_time = nullptr;
     RuntimeProfile::Counter* _scanner_configure_time = nullptr;
     RuntimeProfile::Counter* _runtime_filter_sql_translation_time = nullptr;

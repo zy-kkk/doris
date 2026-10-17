@@ -35,6 +35,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalCTEConsumer;
 import org.apache.doris.nereids.trees.plans.logical.LogicalCatalogRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPartitionTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
@@ -80,6 +81,24 @@ public class AdjustNullable extends DefaultPlanRewriter<Map<ExprId, Slot>> imple
 
     public AdjustNullable(boolean isAnalyzedPhase) {
         this.isAnalyzedPhase = isAnalyzedPhase;
+    }
+
+    @Override
+    public Plan visitLogicalGroupTopN(LogicalGroupTopN<? extends Plan> topN, Map<ExprId, Slot> replaceMap) {
+        topN = (LogicalGroupTopN<? extends Plan>) super.visit(topN, replaceMap);
+        Optional<List<Expression>> groups = updateExpressions(topN.getGroupKeys(), replaceMap, true);
+        boolean changed = groups.isPresent();
+        ImmutableList.Builder<OrderKey> orders = ImmutableList.builder();
+        for (OrderKey key : topN.getOrderKeys()) {
+            Optional<Expression> expression = updateExpression(key.getExpr(), replaceMap, true);
+            changed |= expression.isPresent();
+            orders.add(expression.isPresent() ? key.withExpression(expression.get()) : key);
+        }
+        if (!changed) {
+            return topN;
+        }
+        return new LogicalGroupTopN<>(groups.orElse(topN.getGroupKeys()), orders.build(),
+                topN.getLimit(), topN.getOffset(), topN.child());
     }
 
     @Override

@@ -52,7 +52,7 @@ enum class SearchKind { NORMAL, VECTOR, FULL_TEXT };
 class LanceRecordBatchConverter {
 public:
     Status init(RuntimeState* runtime_state, const std::vector<ColumnDefinition>& projected_columns,
-                SearchKind search_kind);
+                SearchKind search_kind, bool batch_search = false);
 
     Status convert_record_batch_to_block(
             const std::shared_ptr<arrow::RecordBatch>& record_batch, Block* block,
@@ -78,6 +78,7 @@ private:
                                   const GlobalRowIdContext& context) const;
 
     SearchKind _search_kind = SearchKind::NORMAL;
+    bool _batch_search = false;
     cctz::time_zone _timezone;
     arrow::MemoryPool* _memory_pool = nullptr;
     std::vector<OutputColumn> _output_columns;

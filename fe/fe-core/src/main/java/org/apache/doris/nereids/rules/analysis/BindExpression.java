@@ -59,6 +59,7 @@ import org.apache.doris.nereids.trees.expressions.Properties;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.SlotReference;
 import org.apache.doris.nereids.trees.expressions.StatementScopeIdGenerator;
+import org.apache.doris.nereids.trees.expressions.SubqueryExpr;
 import org.apache.doris.nereids.trees.expressions.WindowExpression;
 import org.apache.doris.nereids.trees.expressions.functions.BoundFunction;
 import org.apache.doris.nereids.trees.expressions.functions.Function;
@@ -89,6 +90,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalCatalogRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalExcept;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalHaving;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIcebergDeleteSink;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIcebergMergeSink;
@@ -1247,10 +1249,39 @@ public class BindExpression implements AnalysisRuleFactory {
                 boundConjuncts.add(conjunct);
             }
         }
-        if (!changed) {
+        LogicalFilter<Plan> boundFilter = changed
+                ? new LogicalFilter<>(boundConjuncts.build(), filter.child()) : filter;
+        return bindBatchSearchFilter(boundFilter);
+    }
+
+    private Plan bindBatchSearchFilter(LogicalFilter<Plan> filter) {
+        Plan child = filter.child();
+        LogicalSubQueryAlias<?> alias = child instanceof LogicalSubQueryAlias
+                ? (LogicalSubQueryAlias<?>) child : null;
+        Plan search = alias == null ? child : alias.child();
+        if (!(search instanceof LogicalGroupTopN) || !(search.child(0) instanceof LogicalTVFRelation)) {
             return filter;
         }
-        return new LogicalFilter<>(boundConjuncts.build(), filter.child());
+        LogicalTVFRelation relation = (LogicalTVFRelation) search.child(0);
+        if (!(relation.getFunction() instanceof VectorSearch)
+                || !((VectorSearchTableValuedFunction) relation.getFunction().getCatalogFunction()).isBatchSearch()) {
+            return filter;
+        }
+        Set<Slot> output = relation.getOutputSet();
+        if (!output.containsAll(filter.getInputSlots()) || filter.getConjuncts().stream()
+                .anyMatch(conjunct -> conjunct.anyMatch(expr -> expr instanceof SubqueryExpr
+                        && !output.containsAll(((SubqueryExpr) expr).getCorrelateSlots())))) {
+            // Decorrelation cannot pull an outer reference through this per-query window.
+            // Leaving it above the window instead would change the direct WHERE contract.
+            throw new AnalysisException("Correlated predicates in a direct batch vector_search WHERE are not supported;"
+                    + " wrap vector_search in a derived table to filter the completed search results");
+        }
+        // Bind only the WHERE of a direct batch TVF (optionally aliased) below its merge window.
+        // At this stage a derived table still has a Project below its alias, and joins and CTE
+        // consumers retain their own nodes. Their predicates must filter the completed window.
+        // Alias slots preserve ExprIds, so the bound predicates also reference the TVF output.
+        Plan filteredSearch = search.withChildren(new LogicalFilter<>(filter.getConjuncts(), relation));
+        return alias == null ? filteredSearch : alias.withChildren(ImmutableList.of(filteredSearch));
     }
 
     private Plan bindPreFilter(MatchingContext<LogicalPreFilter<Plan>> ctx) {
@@ -1922,6 +1953,9 @@ public class BindExpression implements AnalysisRuleFactory {
                         case "offset":
                             boundProperties.put(key, "0");
                             break;
+                        case "query_vectors":
+                            boundProperties.put(key, "[]");
+                            break;
                         case "filter":
                             boundProperties.put(key, "true");
                             break;
@@ -1952,7 +1986,8 @@ public class BindExpression implements AnalysisRuleFactory {
         }
         TableValuedFunction tableValuedFunction = (TableValuedFunction) bindResult.first;
         if (tableValuedFunction instanceof VectorSearch && statementContext.isPrepareStage()
-                && unboundTVFRelation.getPropertyParameters().containsKey("query_vector")) {
+                && (unboundTVFRelation.getPropertyParameters().containsKey("query_vector")
+                || unboundTVFRelation.getPropertyParameters().containsKey("query_vectors"))) {
             tableValuedFunction = new VectorSearch(arguments, true);
         }
         LogicalTVFRelation relation = new LogicalTVFRelation(
@@ -1963,15 +1998,23 @@ public class BindExpression implements AnalysisRuleFactory {
         }
 
         // Each distributed Lance search split returns topK + offset candidates. Wrap the TVF
-        // relation with a Doris TopN to merge them into the snapshot-wide result. The predicate
-        // pushdown rules move an outer WHERE below this synthetic TopN, where it is evaluated as
-        // a Doris scan residual after each fragment's Lance search and before the global TopN.
+        // relation with a Doris TopN to merge them into the snapshot-wide result. For batch search,
+        // bindFilter places only a direct TVF WHERE below the merge window. Single-query predicate
+        // pushdown rules move WHERE below the synthetic TopN. Both evaluate it as a Doris scan
+        // residual after each fragment's Lance search and before the global merge.
         if (tableValuedFunction instanceof VectorSearch) {
             VectorSearchTableValuedFunction vectorSearch =
                     (VectorSearchTableValuedFunction) tableValuedFunction.getCatalogFunction();
             Slot distance = requireSearchResultSlot(
                     relation, VectorSearchTableValuedFunction.DISTANCE_COLUMN,
                     VectorSearchTableValuedFunction.NAME);
+            if (vectorSearch.isBatchSearch()) {
+                Slot queryIndex = requireSearchResultSlot(relation,
+                        VectorSearchTableValuedFunction.QUERY_INDEX_COLUMN, VectorSearchTableValuedFunction.NAME);
+                return new LogicalGroupTopN<>(ImmutableList.of(queryIndex),
+                        ImmutableList.of(new OrderKey(distance, true, false)),
+                        vectorSearch.getTopK(), vectorSearch.getOffset(), relation);
+            }
             return new LogicalTopN<>(ImmutableList.of(new OrderKey(distance, true, false)),
                     vectorSearch.getTopK(), vectorSearch.getOffset(), relation);
         }

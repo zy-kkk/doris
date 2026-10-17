@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
 
 #include "core/block/block.h"
 #include "exec/operator/operator_helper.h"
@@ -202,6 +203,57 @@ struct PartitionSortOperatorTest : public ::testing::Test {
         source_thread.join();
     }
 };
+
+TEST_F(PartitionSortOperatorTest, GroupTopNWireOffsetValidation) {
+    MockDescriptorTbl descs({std::make_shared<DataTypeInt64>()}, &pool);
+    TPlanNode node;
+    node.__set_node_id(0);
+    node.__set_node_type(TPlanNodeType::GROUP_TOPN_NODE);
+    node.__set_limit(-1);
+    node.__set_row_tuples({0});
+    node.__set_nullable_tuples({false});
+    TPartitionSortNode partition;
+    partition.__set_top_n_algorithm(TopNAlgorithm::ROW_NUMBER);
+    partition.__set_ptopn_phase(TPartTopNPhase::TWO_PHASE_GLOBAL);
+    partition.__set_partition_inner_limit(4);
+    partition.__set_has_global_limit(false);
+    partition.__set_partition_offset(1);
+    node.__set_partition_sort_node(partition);
+
+    {
+        PartitionSortSinkOperatorX op(&pool, 0, 1, node, descs);
+        ASSERT_TRUE(op.init(node, state.get()).ok());
+        EXPECT_EQ(1, op._partition_offset);
+        EXPECT_EQ(4, op._partition_inner_limit);
+    }
+    for (int invalid : {0, 1, 2}) {
+        SCOPED_TRACE(invalid);
+        auto invalid_node = node;
+        auto& params = invalid_node.partition_sort_node;
+        if (invalid == 0) {
+            params.__set_partition_offset(-1);
+        } else if (invalid == 1) {
+            params.__set_top_n_algorithm(TopNAlgorithm::RANK);
+        } else {
+            params.__set_ptopn_phase(TPartTopNPhase::TWO_PHASE_LOCAL);
+        }
+        PartitionSortSinkOperatorX op(&pool, 0, 1, invalid_node, descs);
+        const auto status = op.init(invalid_node, state.get());
+        EXPECT_FALSE(status.ok());
+        EXPECT_NE(std::string::npos,
+                  status.to_string().find("partition_offset requires global ROW_NUMBER"));
+    }
+    // Local GroupTopN and legacy partition sort continue to omit the offset field.
+    for (auto type : {TPlanNodeType::GROUP_TOPN_NODE, TPlanNodeType::PARTITION_SORT_NODE}) {
+        auto local_node = node;
+        local_node.__set_node_type(type);
+        local_node.partition_sort_node.__isset.partition_offset = false;
+        local_node.partition_sort_node.__set_ptopn_phase(TPartTopNPhase::TWO_PHASE_LOCAL);
+        PartitionSortSinkOperatorX op(&pool, 0, 1, local_node, descs);
+        ASSERT_TRUE(op.init(local_node, state.get()).ok());
+        EXPECT_EQ(0, op._partition_offset);
+    }
+}
 
 TEST_F(PartitionSortOperatorTest, test) {
     for (int i = 0; i < 100; i++) {

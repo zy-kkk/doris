@@ -34,11 +34,15 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
 import org.apache.arrow.memory.util.Float16;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 
+import java.io.IOException;
+import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -52,6 +56,7 @@ import java.util.Set;
 public class VectorSearchTableValuedFunction extends LanceExternalSearchTableValuedFunction {
     public static final String NAME = "vector_search";
     public static final String DISTANCE_COLUMN = "_distance";
+    public static final String QUERY_INDEX_COLUMN = "query_index";
 
     // Keep aligned with the BE and Lance-C limits: each subvector expands into an ANN branch.
     private static final int MAX_QUERY_VECTORS = 128;
@@ -59,6 +64,7 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
 
     private static final String ARROW_EXTENSION_NAME = "ARROW:extension:name";
     private static final String QUERY_VECTOR = "query_vector";
+    private static final String QUERY_VECTORS = "query_vectors";
     private static final String METRIC = "metric";
     private static final String QUERY_PARALLELISM = "query_parallelism";
     private static final String NPROBES = "nprobes";
@@ -68,7 +74,7 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
     private static final String DISTANCE_UPPER_BOUND = "distance_upper_bound";
     private static final String USE_INDEX = "use_index";
     private static final Set<String> PROPERTIES = ImmutableSet.of(
-            TABLE, COLUMN, QUERY_VECTOR, TOP_K, OFFSET, METRIC, FILTER, PREFILTER,
+            TABLE, COLUMN, QUERY_VECTOR, QUERY_VECTORS, TOP_K, OFFSET, METRIC, FILTER, PREFILTER,
             NPROBES, REFINE_FACTOR, EF, USE_INDEX, QUERY_PARALLELISM,
             VERSION, TIMESTAMP, TAG, BRANCH, DISTANCE_LOWER_BOUND, DISTANCE_UPPER_BOUND);
 
@@ -85,8 +91,15 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
     private static PreparedSearch prepare(Map<String, String> properties, boolean deferQueryVector)
             throws AnalysisException {
         Map<String, String> params = normalizeProperties(properties, PROPERTIES, NAME);
+        boolean batch = params.containsKey(QUERY_VECTORS);
+        if (batch && params.containsKey(QUERY_VECTOR)) {
+            throw new AnalysisException("'query_vector' and 'query_vectors' are mutually exclusive");
+        }
         TVectorSearchParams vectorParams = parseDistanceBounds(params);
         boolean hasDistanceRange = vectorParams.isSetDistanceLowerBound() || vectorParams.isSetDistanceUpperBound();
+        if (batch && hasDistanceRange) {
+            throw new AnalysisException("Distance bounds are not supported for Lance batch vector search");
+        }
         boolean useIndex = !params.containsKey(USE_INDEX)
                 || parseBoolean(params.get(USE_INDEX), USE_INDEX);
         CommonSearch common = prepareCommon(params, NAME,
@@ -94,6 +107,13 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
 
         Field vectorField = requireSearchColumn(
                 common.metadata().getSchema(), required(params, COLUMN, NAME), "vector");
+        if (batch) {
+            if (vectorField.getType() instanceof ArrowType.List) {
+                throw new AnalysisException("Batch vector search requires a single-vector column; "
+                        + "use 'query_vector' for multi-vector search");
+            }
+            analyzeVectorField(vectorField);
+        }
         // Reject matrices at PREPARE as well as EXECUTE; lance-c only supports single-vector ranges.
         if (hasDistanceRange && vectorField.getType() instanceof ArrowType.List) {
             throw new AnalysisException("Distance bounds are not supported for Lance multi-vector search");
@@ -105,8 +125,9 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
         if (deferQueryVector) {
             analyzeQueryVectorField(vectorField);
         } else {
-            queryVector = parseAndEncodeQueryVector(
-                    vectorField, required(params, QUERY_VECTOR, NAME));
+            queryVector = batch
+                    ? parseAndEncodeBatchQuery(vectorField, required(params, QUERY_VECTORS, NAME))
+                    : parseAndEncodeQueryVector(vectorField, required(params, QUERY_VECTOR, NAME));
         }
 
         vectorParams.setColumn(vectorField.getName())
@@ -119,12 +140,14 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
         if (!deferQueryVector) {
             validateMultiVectorBudget(queryVector, common.topK(), common.offset(),
                     params.containsKey(REFINE_FACTOR) ? parsePositiveInt(params.get(REFINE_FACTOR), REFINE_FACTOR) : 1);
+            validateBatchBudget(queryVector, common.topK(), common.offset(),
+                    params.containsKey(REFINE_FACTOR) ? parsePositiveInt(params.get(REFINE_FACTOR), REFINE_FACTOR) : 1);
             if (queryVector.isSetNumVectors() && vectorParams.getMetric() == TVectorMetric.HAMMING) {
                 throw new AnalysisException("Lance multi-vector search supports l2, cosine, and dot metrics");
             }
         }
         TExternalSearchRequest searchRequest = new TExternalSearchRequest()
-                .setSchemaVersion(1)
+                .setSchemaVersion(batch ? 2 : 1)
                 .setSearchQuery(TExternalSearchQuery.vector_search(vectorParams));
         TVectorSearchOptions vectorSearchOptions = buildVectorSearchOptions(params, useIndex);
         if (vectorSearchOptions != null) {
@@ -150,6 +173,96 @@ public class VectorSearchTableValuedFunction extends LanceExternalSearchTableVal
                     "distance_lower_bound must be less than distance_upper_bound at FLOAT precision");
         }
         return vector;
+    }
+
+    public boolean isBatchSearch() {
+        return getSearchSchemaVersion() == 2;
+    }
+
+    public int getNumQueries() {
+        return getSearchNumQueries();
+    }
+
+    @VisibleForTesting
+    static void validateBatchBudget(TSearchVector query, long topK, long offset, int refineFactor)
+            throws AnalysisException {
+        if (!query.isSetNumQueries()) {
+            return;
+        }
+        int count = query.getNumQueries();
+        if (count <= 0 || count > MAX_QUERY_VECTORS || topK <= 0 || offset < 0 || refineFactor <= 0
+                || offset > MAX_QUERY_VECTOR_CANDIDATES
+                || topK > MAX_QUERY_VECTOR_CANDIDATES - offset
+                || topK + offset > MAX_QUERY_VECTOR_CANDIDATES / count / refineFactor) {
+            throw new AnalysisException("Batch vector query exceeds 128 queries or 100000 candidate budget");
+        }
+    }
+
+    @VisibleForTesting
+    static TSearchVector parseAndEncodeBatchQuery(Field field, String json) throws AnalysisException {
+        VectorEncodingSpec spec = analyzeVectorField(field);
+        // Validate shape and budgets without constructing a DOM or allocating from untrusted dimensions.
+        int count = readBatchQueryVectors(json, spec, null);
+        int bytes = (int) ((long) count * spec.dimension * spec.byteWidth);
+        ByteBuffer buffer = ByteBuffer.allocate(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        readBatchQueryVectors(json, spec, buffer);
+        return new TSearchVector().setElementType(spec.elementType).setDimension(spec.dimension)
+                .setValues(buffer.array()).setNumQueries(count);
+    }
+
+    private static int readBatchQueryVectors(String json, VectorEncodingSpec spec, ByteBuffer buffer)
+            throws AnalysisException {
+        try (JsonReader reader = new JsonReader(new StringReader(json))) {
+            if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+                throw new AnalysisException("'query_vectors' must be a JSON matrix");
+            }
+            reader.beginArray();
+            int count = 0;
+            long bytesPerVector = (long) spec.dimension * spec.byteWidth;
+            while (reader.hasNext()) {
+                if (++count > MAX_QUERY_VECTORS) {
+                    throw new AnalysisException("'query_vectors' requires 1..128 query vectors");
+                }
+                if (bytesPerVector > (64L * 1024 * 1024) / count) {
+                    throw new AnalysisException("Batch query vector bytes exceed 64 MiB");
+                }
+                if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+                    throw new AnalysisException("Each batch query must be an array of dimension " + spec.dimension);
+                }
+                reader.beginArray();
+                int dimension = 0;
+                while (reader.hasNext()) {
+                    if (dimension >= spec.dimension) {
+                        throw new AnalysisException("Each batch query must be an array of dimension " + spec.dimension);
+                    }
+                    if (reader.peek() != JsonToken.NUMBER) {
+                        throw new AnalysisException("Query vector element " + dimension + " must be a number");
+                    }
+                    String number = reader.nextString();
+                    if (buffer != null) {
+                        Number value = spec.elementType == TVectorElementType.INT8
+                                || spec.elementType == TVectorElementType.UINT8
+                                ? new BigDecimal(number) : Double.valueOf(number);
+                        writeQueryVectorElement(new JsonPrimitive(value), dimension, spec.elementType, buffer);
+                    }
+                    dimension++;
+                }
+                reader.endArray();
+                if (dimension != spec.dimension) {
+                    throw new AnalysisException("Each batch query must be an array of dimension " + spec.dimension);
+                }
+            }
+            reader.endArray();
+            if (count == 0) {
+                throw new AnalysisException("'query_vectors' requires 1..128 query vectors");
+            }
+            if (reader.peek() != JsonToken.END_DOCUMENT) {
+                throw new AnalysisException("Invalid 'query_vectors' JSON");
+            }
+            return count;
+        } catch (IOException | RuntimeException e) {
+            throw new AnalysisException("Invalid 'query_vectors' JSON", e);
+        }
     }
 
     private static float parseDistanceBound(String value, String property) throws AnalysisException {

@@ -44,6 +44,10 @@
 # unicode_branch.lance is built by pylance 12.0.0, because Lance 7 stores a non-ASCII branch
 # directory percent-encoded, which Lance 12 does not find (see lance_build_unicode_branch.py).
 #
+# The batch_search fixtures use pylance 13.0.0b18 to create independently trained physical
+# index segments. lance_build_batch_search.py generates them separately; catalog rebuilds
+# carry the existing files forward, like legacy_vector_index.lance.
+#
 # The pylance and lance-namespace pins are enforced rather than advisory:
 # check_pinned_writer() refuses to build or verify the fixture unless the installed versions
 # match them exactly. That check has to exist because the generator's own self-check cannot

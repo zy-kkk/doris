@@ -113,7 +113,7 @@ public class PhysicalTVFRelation extends PhysicalRelation implements TVFRelation
         return Utils.toSqlString("PhysicalTVFRelation",
                 "qualified", Utils.qualifiedName(ImmutableList.of(), function.getTable().getName()),
                 "output", getOutput(),
-                "function", function.toSql(),
+                "function", function,
                 "operativeSlots", operativeSlots
         );
     }

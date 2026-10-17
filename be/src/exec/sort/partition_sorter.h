@@ -115,8 +115,10 @@ private:
     std::unique_ptr<MergeSorterState> _state;
     const RowDescriptor& _row_desc;
     int64_t _output_total_rows = 0;
+    int64_t _consumed_rows = 0;
     int64_t _output_distinct_rows = 0;
     int64_t _partition_inner_limit = 0;
+    int64_t _partition_offset = 0;
     TopNAlgorithm::type _top_n_algorithm = TopNAlgorithm::type::ROW_NUMBER;
     SortCursorCmp* _previous_row = nullptr;
     bool _prepared_finish = false;

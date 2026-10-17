@@ -19,12 +19,30 @@ package org.apache.doris.tablefunction;
 
 import org.apache.doris.analysis.TableName;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.FunctionGenTable;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.datasource.lance.metadata.LanceTableAccess;
 import org.apache.doris.datasource.lance.metadata.LanceTableMetadata;
+import org.apache.doris.nereids.analyzer.UnboundTVFRelation;
+import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.parser.NereidsParser;
+import org.apache.doris.nereids.trees.copier.DeepCopierContext;
+import org.apache.doris.nereids.trees.copier.ExpressionDeepCopier;
+import org.apache.doris.nereids.trees.copier.LogicalPlanDeepCopier;
+import org.apache.doris.nereids.trees.expressions.Placeholder;
+import org.apache.doris.nereids.trees.expressions.Properties;
+import org.apache.doris.nereids.trees.expressions.functions.table.VectorSearch;
+import org.apache.doris.nereids.trees.plans.RelationId;
+import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
+import org.apache.doris.nereids.trees.plans.logical.LogicalTVFRelation;
+import org.apache.doris.nereids.trees.plans.physical.PhysicalTVFRelation;
+import org.apache.doris.nereids.util.MemoTestUtils;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.thrift.TVectorSearchOptions;
 import org.apache.doris.thrift.TVectorSearchParams;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -33,13 +51,132 @@ import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TSerializer;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Optional;
 
 public class VectorSearchTableValuedFunctionTest {
+    @Test
+    public void testBatchPropertyConflictsBeforeMetadataAccess() {
+        for (String property : new String[] {"query_vector", "distance_lower_bound", "distance_upper_bound"}) {
+            for (boolean prepare : new boolean[] {true, false}) {
+                Assert.assertThrows(AnalysisException.class, () -> new VectorSearchTableValuedFunction(
+                        ImmutableMap.of("query_vectors", "[[1,2]]", property, "0"), prepare));
+            }
+        }
+    }
+
+    @Test
+    public void testBatchPlanSummaryPreservesExecutableSql() {
+        String matrix = "[[1,2],[3,4]]";
+        Map<String, String> arguments = ImmutableMap.of("query_vectors", matrix, "top_k", "5");
+        Properties properties = new Properties(arguments);
+        for (boolean prepare : new boolean[] {false, true}) {
+            VectorSearch function = new VectorSearch(properties, prepare);
+            assertBatchSummary(function.toString(), matrix);
+            Assert.assertTrue(function.toString().contains("'top_k' = '5'"));
+            Assert.assertTrue(function.toSql().contains(matrix));
+            Assert.assertSame(properties, function.getTVFProperties());
+            Assert.assertSame(arguments, function.getTVFProperties().getMap());
+            VectorSearch equivalent = new VectorSearch(new Properties(arguments), prepare);
+            Assert.assertEquals(function, equivalent);
+            Assert.assertEquals(function.hashCode(), equivalent.hashCode());
+            Assert.assertSame(function, ExpressionDeepCopier.INSTANCE.deepCopy(function, new DeepCopierContext()));
+        }
+        Assert.assertTrue(properties.toString().contains(matrix));
+        Assert.assertTrue(properties.toSql().contains(matrix));
+        Assert.assertEquals(new Properties(arguments), properties);
+        Assert.assertEquals(matrix, properties.getMap().get("query_vectors"));
+    }
+
+    @Test
+    public void testBatchSummaryInParsedPlanAndPreparedParameters() {
+        ConnectContext previous = ConnectContext.get();
+        MemoTestUtils.createStatementContext("");
+        try {
+            String matrix = "[[1,2],[3,4]]";
+            LogicalPlan parsed = new NereidsParser().parseSingle(
+                    "select * from VeCtOr_SeArCh('QUERY_VECTORS'='" + matrix + "', 'top_k'=?)");
+            UnboundTVFRelation relation = parsed.<UnboundTVFRelation>collectToList(
+                    UnboundTVFRelation.class::isInstance).get(0);
+            assertBatchSummary(parsed.treeString(), matrix);
+            assertBatchSummary(new GroupExpression(relation).toString(), matrix);
+            Assert.assertEquals(matrix, relation.getProperties().getMap().get("query_vectors"));
+            Assert.assertEquals(1, relation.getPropertyParameters().size());
+            Assert.assertTrue(relation.getExpressions().get(0) instanceof Placeholder);
+
+            LogicalPlan prepared = new NereidsParser().parseSingle(
+                    "select * from vector_search('QUERY_VECTORS'=?)");
+            UnboundTVFRelation parameterized = prepared.<UnboundTVFRelation>collectToList(
+                    UnboundTVFRelation.class::isInstance).get(0);
+            Placeholder parameter = parameterized.getPropertyParameters().get("query_vectors");
+            prepared.treeString();
+            UnboundTVFRelation copied = (UnboundTVFRelation) parameterized.withGroupExpression(
+                    Optional.empty());
+            Assert.assertSame(parameter, copied.getPropertyParameters().get("query_vectors"));
+            Assert.assertFalse(copied.getProperties().getMap().containsKey("query_vectors"));
+            Assert.assertTrue(copied.getExpressions().get(0) instanceof Placeholder);
+
+            LogicalPlan otherTvf = new NereidsParser().parseSingle(
+                    "select * from numbers('query_vectors'='" + matrix + "')");
+            Assert.assertTrue(otherTvf.treeString().contains(matrix));
+        } finally {
+            ConnectContext.remove();
+            if (previous != null) {
+                previous.setThreadLocalInfo();
+            }
+        }
+    }
+
+    @Test
+    public void testBatchSummaryInBoundPlansAndMemo() throws Exception {
+        String matrix = "[[1,2],[3,4]]";
+        TableValuedFunctionIf catalogFunction = Mockito.mock(TableValuedFunctionIf.class);
+        FunctionGenTable table = new FunctionGenTable(1, "vector_search", Table.TableType.TABLE_VALUED_FUNCTION,
+                Collections.emptyList(), catalogFunction);
+        Mockito.when(catalogFunction.getTable()).thenReturn(table);
+        VectorSearch function = new VectorSearch(new Properties(ImmutableMap.of("query_vectors", matrix))) {
+            @Override
+            protected TableValuedFunctionIf toCatalogFunction() {
+                return catalogFunction;
+            }
+        };
+        LogicalTVFRelation logical = new LogicalTVFRelation(new RelationId(1), function, ImmutableList.of());
+        PhysicalTVFRelation physical = new PhysicalTVFRelation(new RelationId(1), function,
+                ImmutableList.of(), logical.getLogicalProperties());
+        assertBatchSummary(logical.treeString(), matrix);
+        assertBatchSummary(physical.treeString(), matrix);
+        assertBatchSummary(new GroupExpression(logical).toString(), matrix);
+        assertBatchSummary(new GroupExpression(physical).toString(), matrix);
+        LogicalTVFRelation copied = (LogicalTVFRelation) LogicalPlanDeepCopier.INSTANCE.deepCopy(
+                logical, new DeepCopierContext());
+        Assert.assertSame(function, copied.getFunction());
+        assertBatchSummary(copied.treeString(), matrix);
+        Assert.assertTrue(copied.getFunction().toSql().contains(matrix));
+    }
+
+    @Test
+    public void testBatchSummaryHandlesInvalidInputWithoutPrintingIt() {
+        for (String matrix : new String[] {"malformed matrix", "null", "{}", "[1,2]"}) {
+            VectorSearch function = new VectorSearch(new Properties(ImmutableMap.of("QUERY_VECTORS", matrix)));
+            Assert.assertEquals("vector_search('QUERY_VECTORS' = '<query matrix>')", function.toString());
+            Assert.assertTrue(function.toSql().contains(matrix));
+        }
+        VectorSearch empty = new VectorSearch(new Properties(ImmutableMap.of("query_vectors", "[]")), true);
+        Assert.assertTrue(empty.toString().contains("<0 x 0 matrix>"));
+        VectorSearch single = new VectorSearch(new Properties(ImmutableMap.of("query_vector", "[1,2]")));
+        Assert.assertEquals(single.toSql(), single.toString());
+    }
+
+    private static void assertBatchSummary(String plan, String matrix) {
+        Assert.assertTrue(plan, plan.contains("<2 x 2 matrix>"));
+        Assert.assertFalse(plan, plan.contains(matrix));
+    }
+
     private TVectorSearchOptions parseOptions(Map<String, String> params) throws Exception {
         return VectorSearchTableValuedFunction.buildVectorSearchOptions(params, true);
     }

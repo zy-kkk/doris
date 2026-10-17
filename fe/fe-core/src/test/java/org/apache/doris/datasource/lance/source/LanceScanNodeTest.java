@@ -1040,6 +1040,110 @@ public class LanceScanNodeTest {
     }
 
     @Test
+    public void testBatchCandidateBudgetCountsAllPlannedSplits() throws Exception {
+        // Each scanner fits the existing 100000 budget; two scanners exceed the query-wide budget.
+        Assert.assertEquals(1, newSearchNode(batchBudgetMetadata(1), batchBudgetRequest(128, 781, 0, null))
+                .getSplits(1).size());
+        UserException failure = Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(128, 781, 0, null)).getSplits(1));
+        Assert.assertTrue(failure.getMessage(), failure.getMessage().contains("100000 total candidate budget"));
+        Assert.assertTrue(failure.getMessage(), failure.getMessage().contains("splits=2"));
+        // The split count comes from the plan, independently of how many BEs schedule it.
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(128, 781, 0, null)).getSplits(20));
+    }
+
+    @Test
+    public void testBatchCandidateBudgetIncludesOffsetAndRefineAtBoundary() throws Exception {
+        // S=2, N=2, (K+O)=25000, R=1: exactly 100000 candidates is allowed.
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 24999, 1, null))
+                .getSplits(1).size());
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 25000, 1, null)).getSplits(1));
+        // Explicit R=1 and omitted R have the same budget. R=2 halves the available window.
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 24999, 1, 1))
+                .getSplits(1).size());
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 12499, 1, 2))
+                .getSplits(1).size());
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 12500, 1, 2)).getSplits(1));
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 1, 0, Integer.MAX_VALUE))
+                        .getSplits(1));
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, Long.MAX_VALUE, 1, 1))
+                        .getSplits(1));
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 1, Long.MAX_VALUE, 1))
+                        .getSplits(1));
+    }
+
+    @Test
+    public void testBatchCandidateBudgetUsesIndexAndUncoveredSplits() throws Exception {
+        UUID segment = UUID.fromString("11111111-2222-3333-4444-555555555555");
+        LanceTableMetadata metadata = LanceTableMetadata.createSnapshotWithIndexes(
+                new LanceTableAccess("s3://bucket/table.lance", Collections.emptyMap()), 42, vectorSchema(),
+                Arrays.asList(new LanceFragmentInfo(1, 8, 8), new LanceFragmentInfo(2, 7, 7),
+                        new LanceFragmentInfo(3, 6, 6)), Collections.singletonMap("vector", 9),
+                Collections.singletonList(new LanceIndexSegmentInfo(segment, "vector_idx",
+                        Collections.singletonList(9), Arrays.asList(1L, 2L), IndexType.VECTOR, "L2")));
+        TExternalSearchRequest fits = batchBudgetRequest(2, 25000, 0, null);
+        fits.getVectorSearchOptions().setUseIndex(true);
+        List<Split> splits = newSearchNode(metadata, fits).getSplits(1);
+        Assert.assertEquals(2, splits.size());
+        Assert.assertEquals(Optional.of(segment), ((LanceSplit) splits.get(0)).getIndexSegmentUuid());
+        Assert.assertFalse(((LanceSplit) splits.get(1)).getIndexSegmentUuid().isPresent());
+        TExternalSearchRequest exceeds = batchBudgetRequest(2, 25001, 0, null);
+        exceeds.getVectorSearchOptions().setUseIndex(true);
+        Assert.assertThrows(UserException.class, () -> newSearchNode(metadata, exceeds).getSplits(1));
+    }
+
+    @Test
+    public void testBatchCandidateBudgetAllowsEmptySnapshotAndKeepsSingleCompatibility() throws Exception {
+        Assert.assertTrue(newSearchNode(batchBudgetMetadata(0), batchBudgetRequest(128, 781, 0, null))
+                .getSplits(1).isEmpty());
+        for (int refine : Arrays.asList(0, -1)) {
+            Assert.assertThrows(UserException.class,
+                    () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(2, 1, 0, refine)).getSplits(1));
+        }
+        // Batch-of-one still uses the total budget, while ordinary single/multi-vector searches do not.
+        Assert.assertThrows(UserException.class,
+                () -> newSearchNode(batchBudgetMetadata(2), batchBudgetRequest(1, 50001, 0, null)).getSplits(1));
+        TExternalSearchRequest single = vectorSearchRequest(50001, 0);
+        single.setVectorSearchOptions(new TVectorSearchOptions().setUseIndex(false));
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), single).getSplits(1).size());
+        single.getSearchQuery().getVectorSearch().setQueryVector(new org.apache.doris.thrift.TSearchVector()
+                .setNumVectors(2));
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), single).getSplits(1).size());
+        TExternalSearchRequest noOptions = batchBudgetRequest(2, 25000, 0, null);
+        noOptions.unsetVectorSearchOptions();
+        Assert.assertEquals(2, newSearchNode(batchBudgetMetadata(2), noOptions).getSplits(1).size());
+    }
+
+    private static LanceTableMetadata batchBudgetMetadata(int fragments) {
+        List<LanceFragmentInfo> fixture = new ArrayList<>();
+        for (int i = 1; i <= fragments; i++) {
+            fixture.add(new LanceFragmentInfo(i, 8, 8));
+        }
+        return LanceTableMetadata.createBasicSnapshot(
+                new LanceTableAccess("s3://bucket/table.lance", Collections.emptyMap()), 42, vectorSchema(), fixture);
+    }
+
+    private static TExternalSearchRequest batchBudgetRequest(int queries, long topK, long offset, Integer refine) {
+        TExternalSearchRequest request = vectorSearchRequest(topK, offset);
+        request.setSchemaVersion(2);
+        request.getSearchQuery().getVectorSearch().setQueryVector(new org.apache.doris.thrift.TSearchVector()
+                .setElementType(org.apache.doris.thrift.TVectorElementType.FLOAT32)
+                .setDimension(2).setNumQueries(queries).setValues(new byte[queries * 2 * Float.BYTES]));
+        TVectorSearchOptions options = new TVectorSearchOptions().setUseIndex(false);
+        if (refine != null) {
+            options.setRefineFactor(refine);
+        }
+        request.setVectorSearchOptions(options);
+        return request;
+    }
+
+    @Test
     public void testLanceSplitRejectsInvalidRangeFieldsInFrontend() {
         assertInvalidSplit(() -> LanceSplit.scanFragments("s3://bucket/table.lance", 42,
                 Collections.emptyList(), 1), "Lance scan split must contain fragments");

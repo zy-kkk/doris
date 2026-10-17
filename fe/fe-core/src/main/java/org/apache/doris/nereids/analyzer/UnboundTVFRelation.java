@@ -26,6 +26,7 @@ import org.apache.doris.nereids.trees.expressions.Placeholder;
 import org.apache.doris.nereids.trees.expressions.Properties;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.expressions.functions.table.TableValuedFunction;
+import org.apache.doris.nereids.trees.expressions.functions.table.VectorSearch;
 import org.apache.doris.nereids.trees.plans.BlockFuncDepsPropagation;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
@@ -34,6 +35,7 @@ import org.apache.doris.nereids.trees.plans.algebra.TVFRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalRelation;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
 import org.apache.doris.nereids.util.Utils;
+import org.apache.doris.tablefunction.VectorSearchTableValuedFunction;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -133,7 +135,8 @@ public class UnboundTVFRelation extends LogicalRelation implements TVFRelation, 
     public String toString() {
         return Utils.toSqlString("UnboundTVFRelation",
                 "functionName", functionName,
-                "arguments", properties
+                "arguments", VectorSearchTableValuedFunction.NAME.equalsIgnoreCase(functionName)
+                        ? "Properties(" + VectorSearch.summarizeProperties(properties) + ")" : properties
         );
     }
 

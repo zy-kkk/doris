@@ -59,6 +59,24 @@ import java.util.Set;
 public class MaterializeProbeVisitorTest {
 
     @Test
+    void testBatchQueryIndexIsGeneratedButSingleQueryIndexRemainsPhysical() {
+        PhysicalTVFRelation relation = mockVectorSearchRelation();
+        VectorSearchTableValuedFunction function = Mockito.mock(VectorSearchTableValuedFunction.class);
+        Mockito.when(relation.getFunction().getCatalogFunction()).thenReturn(function);
+        SlotReference queryIndex = new SlotReference("query_index", IntegerType.INSTANCE)
+                .withColumn(new Column("query_index", org.apache.doris.catalog.Type.INT));
+        Mockito.when(relation.getOutput()).thenReturn(ImmutableList.of(queryIndex));
+        Mockito.when(relation.getOperativeSlots()).thenReturn(ImmutableList.of());
+        MaterializeProbeVisitor visitor = new MaterializeProbeVisitor();
+        Mockito.when(function.isBatchSearch()).thenReturn(true);
+        Assertions.assertFalse(visitor.visitPhysicalTVFRelation(relation,
+                new MaterializeProbeVisitor.ProbeContext(queryIndex)).isPresent());
+        Mockito.when(function.isBatchSearch()).thenReturn(false);
+        Assertions.assertTrue(visitor.visitPhysicalTVFRelation(relation,
+                new MaterializeProbeVisitor.ProbeContext(queryIndex)).isPresent());
+    }
+
+    @Test
     void testVectorSearchSupportsLazyMaterialization() {
         MaterializeProbeVisitor visitor = new MaterializeProbeVisitor();
         PhysicalTVFRelation relation = mockVectorSearchRelation();

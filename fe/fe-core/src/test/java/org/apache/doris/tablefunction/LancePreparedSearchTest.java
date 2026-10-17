@@ -66,6 +66,85 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class LancePreparedSearchTest {
+    @org.junit.jupiter.api.Test
+    public void testBatchSchemaConflictsAndUnsupportedCombinations() throws Exception {
+        ConnectContext previous = ConnectContext.get();
+        MemoTestUtils.createConnectContext();
+        try (MockedStatic<LanceExternalSearchTableValuedFunction> lookup = Mockito.mockStatic(
+                LanceExternalSearchTableValuedFunction.class, Mockito.CALLS_REAL_METHODS)) {
+            Map<String, String> batch = ImmutableMap.of("table", "catalog.db.items", "column", "embedding",
+                    "query_vectors", "[[1,2]]", "use_index", "false");
+            for (boolean prepare : new boolean[] {true, false}) {
+                LanceExternalTable multi = mockTable(new AtomicLong(42), true);
+                lookup.when(() -> LanceExternalSearchTableValuedFunction.findLanceExternalTable(
+                        Mockito.any(TableName.class))).thenReturn(multi);
+                Exception multiError = Assertions.assertThrows(org.apache.doris.common.AnalysisException.class,
+                        () -> new VectorSearchTableValuedFunction(batch, prepare));
+                Assertions.assertTrue(multiError.getMessage().contains("use 'query_vector' for multi-vector search"));
+                for (String name : new String[] {"query_index", "Query_Index"}) {
+                    LanceExternalTable collision = mockTable(new AtomicLong(42), false, name);
+                    lookup.when(() -> LanceExternalSearchTableValuedFunction.findLanceExternalTable(
+                            Mockito.any(TableName.class))).thenReturn(collision);
+                    Exception error = Assertions.assertThrows(org.apache.doris.common.AnalysisException.class,
+                            () -> new VectorSearchTableValuedFunction(batch, prepare));
+                    Assertions.assertTrue(error.getMessage().contains("reserves output column 'query_index'"));
+                    VectorSearchTableValuedFunction single = new VectorSearchTableValuedFunction(ImmutableMap.of(
+                            "table", "catalog.db.items", "column", "embedding", "query_vector", "[1,2]",
+                            "use_index", "false"), prepare);
+                    Assertions.assertFalse(single.isBatchSearch());
+                    Assertions.assertEquals(name, single.getTableColumns().get(0).getName());
+                }
+            }
+        } finally {
+            ConnectContext.remove();
+            if (previous != null) {
+                previous.setThreadLocalInfo();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testBatchPrepareAndFreshExecute(boolean useIndex) {
+        ConnectContext previous = ConnectContext.get();
+        ConnectContext context = MemoTestUtils.createConnectContext();
+        LanceExternalTable table = mockTable(new AtomicLong(42));
+        try (MockedStatic<LanceExternalSearchTableValuedFunction> lookup = Mockito.mockStatic(
+                LanceExternalSearchTableValuedFunction.class, Mockito.CALLS_REAL_METHODS)) {
+            lookup.when(() -> LanceExternalSearchTableValuedFunction.findLanceExternalTable(
+                    Mockito.any(TableName.class))).thenReturn(table);
+            Pair<LogicalPlan, StatementContext> parsed = new NereidsParser().parseMultiple(
+                    "select * from vector_search('table'='catalog.db.items', 'column'='embedding', "
+                            + "'use_index'='" + useIndex + "', 'query_vectors'=?, 'top_k'=?, 'offset'=?)").get(0);
+            StatementContext prepare = MemoTestUtils.createStatementContext(context, "");
+            prepare.setPrepareStage(true);
+            VectorSearchTableValuedFunction function = analyze(parsed.first, prepare);
+            Assertions.assertTrue(function.isBatchSearch());
+            Assertions.assertEquals(4, function.getTableColumns().size());
+            Assertions.assertEquals("query_index", function.getTableColumns().get(3).getName());
+            Assertions.assertFalse(function.getTableColumns().get(3).isAllowNull());
+            List<Placeholder> parameters = parsed.second.getPlaceholders();
+            for (String matrix : Arrays.asList("[[1,2]]", "[[3,4],[1,2],[3,4]]", "[[5,6],[7,8]]")) {
+                StatementContext execute = MemoTestUtils.createStatementContext(context, "");
+                execute.getIdToPlaceholderRealExpr().put(parameters.get(0).getPlaceholderId(), new StringLiteral(matrix));
+                execute.getIdToPlaceholderRealExpr().put(parameters.get(1).getPlaceholderId(), new IntegerLiteral(3));
+                execute.getIdToPlaceholderRealExpr().put(parameters.get(2).getPlaceholderId(), new IntegerLiteral(1));
+                function = analyze(parsed.first, execute);
+                Assertions.assertEquals(2, function.getSearchRequest().getSchemaVersion());
+                Assertions.assertEquals(com.google.gson.JsonParser.parseString(matrix).getAsJsonArray().size(),
+                        function.getSearchRequest().getSearchQuery().getVectorSearch().getQueryVector().getNumQueries());
+                execute.getIdToPlaceholderRealExpr().put(parameters.get(1).getPlaceholderId(), new IntegerLiteral(100000));
+                Assertions.assertThrows(org.apache.doris.nereids.exceptions.AnalysisException.class,
+                        () -> analyze(parsed.first, execute));
+            }
+        } finally {
+            ConnectContext.remove();
+            if (previous != null) {
+                previous.setThreadLocalInfo();
+            }
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"'distance_lower_bound'=?, 'distance_upper_bound'=?",
             "'distance_lower_bound'=?", "'distance_upper_bound'=?",
@@ -418,6 +497,10 @@ public class LancePreparedSearchTest {
     }
 
     private LanceExternalTable mockTable(AtomicLong version, boolean multiVector) {
+        return mockTable(version, multiVector, "id");
+    }
+
+    private LanceExternalTable mockTable(AtomicLong version, boolean multiVector, String idColumn) {
         LanceExternalTable table = Mockito.mock(LanceExternalTable.class);
         Field vector = new Field("embedding", org.apache.arrow.vector.types.pojo.FieldType.nullable(
                 new ArrowType.FixedSizeList(2)), Collections.singletonList(
@@ -428,12 +511,12 @@ public class LancePreparedSearchTest {
                             org.apache.arrow.vector.types.pojo.FieldType.notNullable(new ArrowType.FixedSizeList(2)),
                             vector.getChildren())));
         }
-        Schema schema = new Schema(Arrays.asList(Field.nullable("id", new ArrowType.Int(64, true)), vector));
+        Schema schema = new Schema(Arrays.asList(Field.nullable(idColumn, new ArrowType.Int(64, true)), vector));
         Mockito.when(table.loadMetadataForSearch(Mockito.any(LanceRefSelector.class))).thenAnswer(
                 invocation -> LanceTableMetadata.createSnapshotWithIndexes(
                         new LanceTableAccess("s3://bucket/items.lance", Collections.emptyMap()),
                         version.get(), schema, Collections.emptyList(),
-                        ImmutableMap.of("id", 0, "embedding", 1), Collections.emptyList()));
+                        ImmutableMap.of(idColumn, 0, "embedding", 1), Collections.emptyList()));
         Mockito.when(table.loadBasicMetadata(Mockito.any(LanceRefSelector.class))).thenAnswer(
                 invocation -> table.loadMetadataForSearch(invocation.getArgument(0)));
         return table;

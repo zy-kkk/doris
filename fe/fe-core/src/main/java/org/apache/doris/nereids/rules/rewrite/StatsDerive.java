@@ -33,6 +33,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalEmptyRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalExcept;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIntersect;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
 import org.apache.doris.nereids.trees.plans.logical.LogicalLimit;
@@ -212,6 +213,18 @@ public class StatsDerive extends PlanVisitor<Statistics, StatsDerive.DeriveConte
         if (stats == null || deepDerive) {
             Statistics childStats = topN.child().accept(this, context);
             stats = context.calculator.computeTopN(topN, childStats);
+            topN.setStatistics(stats);
+        }
+        return stats;
+    }
+
+    @Override
+    public Statistics visitLogicalGroupTopN(LogicalGroupTopN<? extends Plan> topN, DeriveContext context) {
+        Statistics stats = topN.getStats();
+        if (stats == null || deepDerive) {
+            Statistics childStats = topN.child().accept(this, context);
+            stats = context.calculator.computeGroupTopN(
+                    topN.getGroupKeys(), topN.getLimit(), topN.getOffset(), childStats);
             topN.setStatistics(stats);
         }
         return stats;

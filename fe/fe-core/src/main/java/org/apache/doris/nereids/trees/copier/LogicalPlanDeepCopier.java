@@ -41,6 +41,7 @@ import org.apache.doris.nereids.trees.plans.logical.LogicalEmptyRelation;
 import org.apache.doris.nereids.trees.plans.logical.LogicalExcept;
 import org.apache.doris.nereids.trees.plans.logical.LogicalFilter;
 import org.apache.doris.nereids.trees.plans.logical.LogicalGenerate;
+import org.apache.doris.nereids.trees.plans.logical.LogicalGroupTopN;
 import org.apache.doris.nereids.trees.plans.logical.LogicalHaving;
 import org.apache.doris.nereids.trees.plans.logical.LogicalIntersect;
 import org.apache.doris.nereids.trees.plans.logical.LogicalJoin;
@@ -86,6 +87,18 @@ public class LogicalPlanDeepCopier extends DefaultPlanRewriter<DeepCopierContext
 
     public LogicalPlan deepCopy(LogicalPlan plan, DeepCopierContext context) {
         return (LogicalPlan) plan.accept(this, context);
+    }
+
+    @Override
+    public Plan visitLogicalGroupTopN(LogicalGroupTopN<? extends Plan> topN, DeepCopierContext context) {
+        Plan child = topN.child().accept(this, context);
+        List<Expression> groups = topN.getGroupKeys().stream()
+                .map(key -> ExpressionDeepCopier.INSTANCE.deepCopy(key, context))
+                .collect(ImmutableList.toImmutableList());
+        List<OrderKey> orders = topN.getOrderKeys().stream()
+                .map(key -> key.withExpression(ExpressionDeepCopier.INSTANCE.deepCopy(key.getExpr(), context)))
+                .collect(ImmutableList.toImmutableList());
+        return new LogicalGroupTopN<>(groups, orders, topN.getLimit(), topN.getOffset(), child);
     }
 
     @Override
