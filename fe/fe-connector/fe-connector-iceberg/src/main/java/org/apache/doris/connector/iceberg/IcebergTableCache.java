@@ -151,8 +151,9 @@ final class IcebergTableCache {
                     };
                     TableOwner loaded;
                     try {
-                        // Reject before weight estimation/metadata serialization as well as snapshot conversion.
-                        IcebergScanPlanning.rejectServerSideScanPlanning(table, identifier.toString());
+                        // The owner keeps the SDK table. snapshotReadTable lends a pinned read view for a
+                        // server-planned REST table instead of rebuilding BaseTable. Construction failure
+                        // still runs cleanup before the exception leaves the loader.
                         loaded = new TableOwner(table, cleanup, true,
                                 entry.isEnabled() && entry.isWeightBounded());
                     } catch (RuntimeException | Error failure) {
@@ -316,6 +317,15 @@ final class IcebergTableCache {
         }
 
         private Table snapshotReadTable() {
+            if (IcebergScanPlanning.requiresServerSideScanPlanning(table)) {
+                TableMetadata metadata = null;
+                if (table instanceof BaseTable) {
+                    metadata = snapshotMetadataJson == null
+                            ? ((BaseTable) table).operations().current()
+                            : TableMetadataParser.fromJson(snapshotMetadataLocation, snapshotMetadataJson);
+                }
+                return IcebergServerPlannedReadView.pin(table, metadata);
+            }
             if (!(table instanceof BaseTable)) {
                 return table;
             }

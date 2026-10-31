@@ -1412,23 +1412,30 @@ public class IcebergScanPlanProvider implements ConnectorScanPlanProvider {
     private TableScan buildScan(Table table, IcebergTableHandle handle, Optional<ConnectorExpression> filter,
             ConnectorSession session) {
         Schema selectedSchema = handle.isSystemTable() ? table.schema() : pinnedSchema(table, handle);
-        // Keep the SDK's native Table.newScan implementation unless an actual historical schema needs the
-        // metadata-only snapshot fix; catalog-specific Table wrappers may provide their own scan behavior.
-        TableScan scan = !handle.isSystemTable() && !selectedSchema.sameSchema(table.schema())
-                ? SchemaAwareDataTableScan.newScan(table) : table.newScan();
-        // MVCC / time-travel pin: a tag/branch pins by REF (so a later commit to the ref is honored, legacy
-        // parity), else by snapshot id (legacy createTableScan: useRef when info.getRef()!=null else useSnapshot).
-        if (handle.hasSnapshotPin() && supportsSnapshotSelection(handle)) {
-            if (handle.getRef() != null) {
-                scan = scan.useRef(handle.getRef());
-            } else {
-                scan = scan.useSnapshot(handle.getSnapshotId());
+        TableScan scan;
+        if (!handle.isSystemTable() && IcebergScanPlanning.requiresServerSideScanPlanning(table)) {
+            // SchemaAwareDataTableScan.newScan keeps only the context and builds a local DataTableScan.
+            // The read view already applies useRef/useSnapshot/project; a second useSnapshot throws.
+            scan = IcebergServerPlannedReadView.configureScan(table, handle, selectedSchema);
+        } else {
+            // Keep the SDK's native Table.newScan implementation unless an actual historical schema needs the
+            // metadata-only snapshot fix; catalog-specific Table wrappers may provide their own scan behavior.
+            scan = !handle.isSystemTable() && !selectedSchema.sameSchema(table.schema())
+                    ? SchemaAwareDataTableScan.newScan(table) : table.newScan();
+            // MVCC / time-travel pin: a tag/branch pins by REF (so a later commit to the ref is honored, legacy
+            // parity), else by snapshot id (legacy createTableScan: useRef when info.getRef()!=null else useSnapshot).
+            if (handle.hasSnapshotPin() && supportsSnapshotSelection(handle)) {
+                if (handle.getRef() != null) {
+                    scan = scan.useRef(handle.getRef());
+                } else {
+                    scan = scan.useSnapshot(handle.getSnapshotId());
+                }
             }
-        }
-        // A latest MVCC pin may pair the current schema with the preceding snapshot after a schema-only commit.
-        // Preserve that logical schema explicitly so cache metrics use new field IDs and their initial defaults.
-        if (!handle.isSystemTable() && !scan.schema().sameSchema(selectedSchema)) {
-            scan = scan.project(selectedSchema);
+            // A latest MVCC pin may pair the current schema with the preceding snapshot after a schema-only commit.
+            // Preserve that logical schema explicitly so cache metrics use new field IDs and their initial defaults.
+            if (!handle.isSystemTable() && !scan.schema().sameSchema(selectedSchema)) {
+                scan = scan.project(selectedSchema);
+            }
         }
         if (filter.isPresent()) {
             // Historical predicates must resolve names to the field ids of the generation used for binding;
@@ -3666,6 +3673,10 @@ public class IcebergScanPlanProvider implements ConnectorScanPlanProvider {
      * thread-level wrap in {@link #planSystemTableScan} instead. Package-private for unit testing.
      */
     Table wrapTableForScan(Table table) {
+        if (IcebergScanPlanning.requiresServerSideScanPlanning(table)) {
+            // RESTTable is a BaseTable. Rebuilding it would drop RESTTable.newScan and report planning as allowed.
+            return table;
+        }
         if (!(context instanceof TcclPinningConnectorContext) || !(table instanceof BaseTable)) {
             return table;
         }

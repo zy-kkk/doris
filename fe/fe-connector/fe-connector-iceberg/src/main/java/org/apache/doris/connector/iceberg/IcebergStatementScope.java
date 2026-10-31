@@ -91,7 +91,7 @@ final class IcebergStatementScope {
         // historical "iceberg.table:" key prefix byte-for-byte, so the funnel keeps identical hits / misses / NONE
         // fall-through (proved by IcebergStatementScopeTest#sharedTableKeyReproducesLegacyPrefixByteForByte).
         return ConnectorStatementScopes.resolveInStatement(session, TABLE_NAMESPACE, dbName, tableName,
-                () -> snapshotReadTable(loader.get(), dbName, tableName));
+                () -> snapshotReadTable(loader.get()));
     }
 
     /**
@@ -105,7 +105,7 @@ final class IcebergStatementScope {
         if (session == null || session.getStatementScope() == ConnectorStatementScope.NONE) {
             // NONE has no statement-end callback, so it cannot safely own a lease. Preserve its original direct
             // load-every-time behavior; creating a lease here would drop its only close handle and leak forever.
-            return snapshotReadTable(unscopedLoader.get(), dbName, tableName);
+            return snapshotReadTable(unscopedLoader.get());
         }
         ScopedBorrow borrowed = ConnectorStatementScopes.resolveInStatement(
                 session, TABLE_NAMESPACE, dbName, tableName, () -> new ScopedBorrow(loader.get()));
@@ -159,7 +159,9 @@ final class IcebergStatementScope {
         if (session == null || session.getStatementScope() == ConnectorStatementScope.NONE) {
             Table table = loader.get();
             try {
-                return snapshotReadTable(table, dbName, tableName);
+                // No statement close owns this load. Reject before a read view can outlive the cleanup.
+                IcebergScanPlanning.rejectServerSideScanPlanning(table, dbName + "." + tableName);
+                return snapshotReadTable(table);
             } catch (RuntimeException | Error failure) {
                 try {
                     cleanupFactory.apply(table).run();
@@ -174,6 +176,8 @@ final class IcebergStatementScope {
                 () -> {
                     TrackedTable loaded = trackedTable(resourceTracker, loader, cleanupFactory, true);
                     try {
+                        // Reject before the tracked owner is stored. Failure closes the FileIO and catalog lease
+                        // here; a read view would keep that owner alive until statement teardown.
                         IcebergScanPlanning.rejectServerSideScanPlanning(loaded.table(), dbName + "." + tableName);
                         return loaded;
                     } catch (RuntimeException | Error failure) {
@@ -194,7 +198,7 @@ final class IcebergStatementScope {
             Function<Table, Runnable> cleanupFactory, Function<Table, T> action) {
         if (session == null || session.getStatementScope() == ConnectorStatementScope.NONE) {
             try (TrackedTable tracked = trackedTable(resourceTracker, loader, cleanupFactory, false)) {
-                return action.apply(snapshotReadTable(tracked.table(), dbName, tableName));
+                return action.apply(snapshotReadTable(tracked.table()));
             }
         }
         return action.apply(sharedTrackedTable(
@@ -313,8 +317,11 @@ final class IcebergStatementScope {
         }
     }
 
-    private static Table snapshotReadTable(Table table, String dbName, String tableName) {
-        IcebergScanPlanning.rejectServerSideScanPlanning(table, dbName + "." + tableName);
+    private static Table snapshotReadTable(Table table) {
+        if (IcebergScanPlanning.requiresServerSideScanPlanning(table)) {
+            // Keep the SDK RESTTable. A new BaseTable would plan locally and allow distributed planning.
+            return IcebergServerPlannedReadView.pin(table);
+        }
         if (!(table instanceof BaseTable)) {
             return table;
         }

@@ -78,9 +78,10 @@ class IcebergTableHandleReuseTest {
         IcebergConnectorMetadata metadata = metadata(ops, null);
         ConnectorSession session = session("ddl", new TestStatementScope());
 
-        RuntimeException scanFailure = Assertions.assertThrows(RuntimeException.class,
-                () -> metadata.getTableHandle(session, "db1", "t1"));
-        Assertions.assertTrue(scanFailure.getMessage().contains("server-side scan planning"));
+        // Query handle resolution pins a read view and must not call scan methods. Data scans still fail
+        // in IcebergScanPlanProviderTest / IcebergRestScanPlanningTest before local metadata or /plan.
+        ConnectorTableHandle queryHandle = metadata.getTableHandle(session, "db1", "t1").orElseThrow();
+        Assertions.assertEquals("db1", ((IcebergTableHandle) queryHandle).getDbName());
         Assertions.assertTrue(metadata.tableExists(session, "db1", "t1"));
         int loads = (int) ops.log.stream().filter(s -> s.startsWith("loadTable:")).count();
         ConnectorTableHandle handle = metadata.getTableHandleForDdl(session, "db1", "t1").orElseThrow();
